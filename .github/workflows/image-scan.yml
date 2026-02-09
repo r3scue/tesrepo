@@ -102,7 +102,7 @@ jobs:
             echo "📥 Pulling image $IMAGE_URI ..."
             docker pull "$IMAGE_URI"
             echo "Scanning $IMAGE_URI ..."
-            sudo ifconfig eth0 down  # disable network temporarily
+            # sudo ifconfig eth0 down  # disable network temporarily
             trivy image $IMAGE_URI --scanners vuln --skip-db-update --offline-scan --format json -o trivy-report.json 
             # trivy image $IMAGE_URI --scanners vuln --skip-db-update --offline-scan --format sarif -o trivy-results.sarif
             # sudo ifconfig eth0 up  # re-enable network
