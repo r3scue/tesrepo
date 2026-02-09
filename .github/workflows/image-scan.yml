@@ -226,7 +226,7 @@ jobs:
         with:
           name: trivy-sarif
           path: trivy-results.sarif
-      - name: Upload SARIF Report as Artifact
+      - name: Upload SARIF Report as Artifacss
         uses: actions/upload-artifact@v4
         with:
           name: trivy-sarif
