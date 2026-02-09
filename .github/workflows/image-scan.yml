@@ -215,7 +215,6 @@ jobs:
         with:
           sarif_file: trivy-results.sarif
           # Category helps distinguish container scans from other code scanning results
-          category: "container-security/ecr-image-scan"
         continue-on-error: true  # Don't fail the workflow if upload fails
 
       - name: Check for Critical or High Vulnerabilities
