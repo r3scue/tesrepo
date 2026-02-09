@@ -81,34 +81,45 @@ jobs:
       - name: Scan Image with Trivy and Save Report
         run: |
           ECR_REPOS="${{ github.event.inputs.ecr_repos }}"
-          AWS_ACCOUNT_ID="801754344896"  # Replace with actual AWS account ID
-          REGION="us-west-2"
+          AWS_ACCOUNT_ID="688736627613"
+          REGION="us-east-1"
 
           IFS=',' read -r -a REPO_ARRAY <<< "$ECR_REPOS"
 
           for REPO in "${REPO_ARRAY[@]}"; do
             echo "🔍 Fetching latest image tag for $REPO..."
-            LATEST_TAG=$(aws ecr describe-images \
-              --repository-name $REPO \
-              --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]' \
-              --output text)
+            IMAGE_JSON=$(aws ecr describe-images --repository-name "$ECR_REPOS" --output json)
 
-            if [[ "$LATEST_TAG" == "None" || -z "$LATEST_TAG" ]]; then
-              echo "⚠️ No valid image tag found for $REPO, skipping..."
-              continue
+            # Create placeholder file for SARIF location references
+            # GitHub requires files to exist for SARIF locations
+            SAFE_REPO=$(echo "$REPO" | sed 's/[^a-zA-Z0-9_-]/_/g')
+            mkdir -p "container-scan/${SAFE_REPO}"
+            echo "# Container Vulnerability Report" > "container-scan/${SAFE_REPO}/vulnerabilities.txt"
+            echo "# Repository: $REPO" >> "container-scan/${SAFE_REPO}/vulnerabilities.txt"
+            echo "# This file serves as a location anchor for container security findings." >> "container-scan/${SAFE_REPO}/vulnerabilities.txt"
+            echo "# Actual vulnerabilities are in the container image, not in source code." >> "container-scan/${SAFE_REPO}/vulnerabilities.txt"
+            echo "# View full details in the GitHub Security tab." >> "container-scan/${SAFE_REPO}/vulnerabilities.txt"
+
+            # Safely extract the latest tagged image
+            LATEST_TAG=$(echo "$IMAGE_JSON" | jq -r '
+              .imageDetails
+              | map(select(.imageTags | type == "array" and length > 0))
+              | sort_by(.imagePushedAt)
+              | reverse
+              | .[0].imageTags[0]')
+
+            if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
+              echo "❌ No tagged images found in ECR repository '$ECR_REPOS'."
+              exit 1
             fi
 
             IMAGE_URI="$AWS_ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPO:$LATEST_TAG"
+            echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
             echo "📥 Pulling image $IMAGE_URI ..."
             docker pull "$IMAGE_URI"
             echo "Scanning $IMAGE_URI ..."
             # sudo ifconfig eth0 down  # disable network temporarily
             trivy image $IMAGE_URI --scanners vuln --skip-db-update --offline-scan --format json -o trivy-report.json 
-            # trivy image $IMAGE_URI --scanners vuln --skip-db-update --offline-scan --format sarif -o trivy-results.sarif
-            # sudo ifconfig eth0 up  # re-enable network
-            # jq --arg image "$IMAGE_URI" \
-            #   '.runs[0].results |= map(.message.text |= "[IMAGE: \($image)] " + .)' \
-            #   trivy-results.sarif > trivy-results-patched.sarif
             trivy image $IMAGE_URI --scanners vuln --skip-db-update --offline-scan --format sarif -o trivy-results-raw.sarif
             
             # Enhance SARIF for clear identification in GitHub Security tab
