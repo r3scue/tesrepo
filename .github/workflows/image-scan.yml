@@ -214,6 +214,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-results.sarif
+          category: trivvy-ecr
           # Category helps distinguish container scans from other code scanning results
         continue-on-error: true  # Don't fail the workflow if upload fails
 
