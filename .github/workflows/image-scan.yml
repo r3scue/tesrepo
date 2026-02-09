@@ -229,7 +229,7 @@ jobs:
       - name: Upload SARIF Report as Artifacss
         uses: actions/upload-artifact@v4
         with:
-          name: trivy-sarif
+          name: trivy-sarif-raw
           path: trivy-results-raw.sarif
           
       - name: Display Vulnerabilities
