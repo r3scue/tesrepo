@@ -193,7 +193,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: trivy-sarif-raw
-          path: trivy-results.sarif
+          path: trivy-results-raw.sarif
           
       - name: Display Vulnerabilities
         run: cat trivy-report.json | jq '.Results[].Vulnerabilities[] | {ID, PkgName, InstalledVersion, Severity, Title, Description}'
