@@ -81,8 +81,8 @@ jobs:
       - name: Scan Image with Trivy and Save Report
         run: |
           ECR_REPOS="${{ github.event.inputs.ecr_repos }}"
-          AWS_ACCOUNT_ID="688736627613"
-          REGION="us-east-1"
+          AWS_ACCOUNT_ID="801754344896"  # Replace with actual AWS account ID
+          REGION="us-west-2"
 
           IFS=',' read -r -a REPO_ARRAY <<< "$ECR_REPOS"
 
