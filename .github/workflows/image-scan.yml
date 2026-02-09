@@ -115,38 +115,31 @@ jobs:
             # Enhance SARIF for clear identification in GitHub Security tab
             # CRITICAL: Keep tool.driver.name as "Trivy" for GitHub compatibility
             SAFE_REPO=$(echo "$REPO" | sed 's/[^a-zA-Z0-9_-]/_/g')
-            jq --arg image "$IMAGE_URI" \
-               --arg repo "$REPO" \
-               --arg tag "$LATEST_TAG" \
-               '# Keep tool.driver.name unchanged - REQUIRED for GitHub ingestion
-               .runs[0].tool.driver.fullName = "Trivy Container Scanner - " + $repo |
-               # Add repository tags WITHOUT modifying shortDescription.text
-               .runs[0].tool.driver.rules = [.runs[0].tool.driver.rules[]? | 
-                 .properties.tags = ((.properties.tags // []) + ["container-vulnerability", "ecr-image", $repo])
-               ] |
-               # Enhance result messages with container context
-               .runs[0].results = [.runs[0].results[]? | 
-                 .message.text = "Image: " + $image + "\nRepository: " + $repo + "\nTag: " + $tag + "\n\n" + .message.text
-               ] |
-               # Add automation details for scan tracking
-               .runs[0].automationDetails = {
-                 "id": ("container-security/ecr-scan/" + $repo + "/" + $tag),
-                 "description": {
-                   "text": ("Container vulnerability scan for ECR image: " + $image)
-                 }
-               }' trivy-results-raw.sarif > trivy-results.sarif
-            
-            # Validate SARIF structure
-            echo "📋 Validating SARIF structure..."
-            if jq empty trivy-results.sarif 2>/dev/null; then
-              echo "✅ SARIF JSON is valid"
-            else
-              echo "❌ SARIF JSON is invalid!"
-              exit 1
-            fi
-            
-            echo "✅ Enhanced SARIF report generated for $IMAGE_URI"
-          done
+           jq --arg repo "$REPO" \
+            '.runs[0].tool.driver.name = "Watchdog" |
+             .runs[0].tool.driver.rules = [
+               .runs[0].tool.driver.rules[]? |
+               .properties.tags = ((.properties.tags // []) + [$repo])
+             ] |
+             .runs[0].results = [
+               .runs[0].results[]? |
+               .message.text = ($repo + ": " + .message.text)
+             ]' \
+            trivy-results-raw.sarif > trivy-results.sarif
+
+          
+                      
+                      # Validate SARIF structure
+                      echo "📋 Validating SARIF structure..."
+                      if jq empty trivy-results.sarif 2>/dev/null; then
+                        echo "✅ SARIF JSON is valid"
+                      else
+                        echo "❌ SARIF JSON is invalid!"
+                        exit 1
+                      fi
+                      
+                      echo "✅ Enhanced SARIF report generated for $IMAGE_URI"
+                    done
 
       # - name: Scan Image with Trivy and Save Report
       #   run: |
