@@ -151,7 +151,9 @@ jobs:
                ] |
                
                # Update results with proper GitHub-compatible locations
-               .runs[0].results = [.runs[0].results[] | 
+               # Filter out any results that don't have proper structure
+               .runs[0].results = [.runs[0].results[]? | 
+                 select(.ruleId != null and .message != null) |
                  # Create a meaningful virtual file path for container vulnerabilities
                  .locations = [
                    {
@@ -167,30 +169,31 @@ jobs:
                        }
                      },
                      "message": {
-                       "text": .locations[0].message.text
+                       "text": ((.locations[0].message.text // "") | if . == "" then "Container vulnerability" else . end)
                      }
                    }
                  ] |
                  # Enhance the message with clear container context
-                 .message.text = "🐳 **ECR Container Vulnerability**\n\n**Image:** `" + $image + "`\n**Repository:** " + $repo + "\n**Tag:** " + $tag + "\n\n---\n\n" + (.message.text | gsub("🐳 \\[ECR Image: [^\\]]+\\]\\n\\n"; ""))
+                 .message.text = "🐳 **ECR Container Vulnerability**\n\n**Image:** `" + $image + "`\n**Repository:** " + $repo + "\n**Tag:** " + $tag + "\n\n---\n\n" + ((.message.text // "") | gsub("🐳 \\[ECR Image: [^\\]]+\\]\\n\\n"; ""))
                ] |
                
                # Add automation details for filtering
                .runs[0].automationDetails = {
                  "id": ("container-security/ecr-scan/" + $repo + "/" + $tag),
-                 "guid": (now | tostring),
                  "description": {
                    "text": ("Container vulnerability scan for ECR image: " + $image)
                  }
-               } |
-               
-               # Add original URI base IDs for the run (GitHub expects this)
-               .runs[0].originalUriBaseIds = {
-                 "SRCROOT": {
-                   "uri": "file:///"
-                 }
                }
                ' trivy-results-raw.sarif > trivy-results.sarif
+            
+            # Validate SARIF structure
+            echo "📋 Validating SARIF structure..."
+            if jq empty trivy-results.sarif 2>/dev/null; then
+              echo "✅ SARIF JSON is valid"
+            else
+              echo "❌ SARIF JSON is invalid!"
+              exit 1
+            fi
             
             echo "✅ Enhanced SARIF report generated for $IMAGE_URI"
           done
