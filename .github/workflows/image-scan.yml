@@ -207,6 +207,12 @@ jobs:
         with:
           name: trivy-csv
           path: trivy-report.csv
+
+      - name: Upload SARIF Report as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-sarif
+          path: trivy-results.sarif
           
       - name: Display Vulnerabilities
         run: cat trivy-report.json | jq '.Results[].Vulnerabilities[] | {ID, PkgName, InstalledVersion, Severity, Title, Description}'
