@@ -129,32 +129,17 @@ jobs:
                --arg repo "$REPO" \
                --arg tag "$LATEST_TAG" \
                --arg safeRepo "$SAFE_REPO" \
-               '
-               # Update tool name and metadata for clear identification
-               .runs[0].tool.driver.name = "Trivy Container Scanner" |
+               '.runs[0].tool.driver.name = "Trivy Container Scanner" |
                .runs[0].tool.driver.fullName = "Trivy ECR Image Vulnerability Scanner" |
                .runs[0].tool.driver.informationUri = "https://aquasecurity.github.io/trivy/" |
                .runs[0].tool.driver.version = (.runs[0].tool.driver.version // "latest") |
-               
-               # Add semantic version for GitHub compatibility
                .runs[0].tool.driver.semanticVersion = (.runs[0].tool.driver.version // "0.0.0") |
-               
-               # Update rules with better categorization and tags (keep original IDs for GitHub compatibility)
                .runs[0].tool.driver.rules = [.runs[0].tool.driver.rules[]? | 
                  .shortDescription.text = "[Container: " + $repo + "] " + .shortDescription.text |
-                 .properties.tags = ((.properties.tags // []) + ["container-vulnerability", "ecr-image", "trivy", $repo]) |
-                 .properties["problem.severity"] = (
-                   if .defaultConfiguration.level == "error" then "error"
-                   elif .defaultConfiguration.level == "warning" then "warning"
-                   else "note" end
-                 )
+                 .properties.tags = ((.properties.tags // []) + ["container-vulnerability", "ecr-image", "trivy", $repo])
                ] |
-               
-               # Update results with proper GitHub-compatible locations
-               # Filter out any results that don't have proper structure
                .runs[0].results = [.runs[0].results[]? | 
                  select(.ruleId != null and .message != null) |
-                 # Create a meaningful virtual file path for container vulnerabilities
                  .locations = [
                    {
                      "physicalLocation": {
@@ -169,22 +154,18 @@ jobs:
                        }
                      },
                      "message": {
-                       "text": ((.locations[0].message.text // "") | if . == "" then "Container vulnerability" else . end)
+                       "text": (.locations[0].message.text // "Container vulnerability")
                      }
                    }
                  ] |
-                 # Enhance the message with clear container context
-                 .message.text = "🐳 **ECR Container Vulnerability**\n\n**Image:** `" + $image + "`\n**Repository:** " + $repo + "\n**Tag:** " + $tag + "\n\n---\n\n" + ((.message.text // "") | gsub("🐳 \\[ECR Image: [^\\]]+\\]\\n\\n"; ""))
+                 .message.text = "ECR Container Vulnerability\n\nImage: " + $image + "\nRepository: " + $repo + "\nTag: " + $tag + "\n\n" + (.message.text // "")
                ] |
-               
-               # Add automation details for filtering
                .runs[0].automationDetails = {
                  "id": ("container-security/ecr-scan/" + $repo + "/" + $tag),
                  "description": {
                    "text": ("Container vulnerability scan for ECR image: " + $image)
                  }
-               }
-               ' trivy-results-raw.sarif > trivy-results.sarif
+               }' trivy-results-raw.sarif > trivy-results.sarif
             
             # Validate SARIF structure
             echo "📋 Validating SARIF structure..."
