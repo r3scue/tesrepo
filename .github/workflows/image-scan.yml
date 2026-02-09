@@ -90,16 +90,6 @@ jobs:
             echo "🔍 Fetching latest image tag for $REPO..."
             IMAGE_JSON=$(aws ecr describe-images --repository-name "$ECR_REPOS" --output json)
 
-            # Create placeholder file for SARIF location references
-            # GitHub requires files to exist for SARIF locations
-            SAFE_REPO=$(echo "$REPO" | sed 's/[^a-zA-Z0-9_-]/_/g')
-            mkdir -p "container-scan/${SAFE_REPO}"
-            echo "# Container Vulnerability Report" > "container-scan/${SAFE_REPO}/vulnerabilities.txt"
-            echo "# Repository: $REPO" >> "container-scan/${SAFE_REPO}/vulnerabilities.txt"
-            echo "# This file serves as a location anchor for container security findings." >> "container-scan/${SAFE_REPO}/vulnerabilities.txt"
-            echo "# Actual vulnerabilities are in the container image, not in source code." >> "container-scan/${SAFE_REPO}/vulnerabilities.txt"
-            echo "# View full details in the GitHub Security tab." >> "container-scan/${SAFE_REPO}/vulnerabilities.txt"
-
             # Safely extract the latest tagged image
             LATEST_TAG=$(echo "$IMAGE_JSON" | jq -r '
               .imageDetails
@@ -123,42 +113,19 @@ jobs:
             trivy image $IMAGE_URI --scanners vuln --skip-db-update --offline-scan --format sarif -o trivy-results-raw.sarif
             
             # Enhance SARIF for clear identification in GitHub Security tab
-            # GitHub requires valid file paths - we use a virtual path structure for container findings
+            # Keep original structure intact, only add metadata for identification
             SAFE_REPO=$(echo "$REPO" | sed 's/[^a-zA-Z0-9_-]/_/g')
             jq --arg image "$IMAGE_URI" \
                --arg repo "$REPO" \
                --arg tag "$LATEST_TAG" \
-               --arg safeRepo "$SAFE_REPO" \
                '.runs[0].tool.driver.name = "Trivy Container Scanner" |
-               .runs[0].tool.driver.fullName = "Trivy ECR Image Vulnerability Scanner" |
-               .runs[0].tool.driver.informationUri = "https://aquasecurity.github.io/trivy/" |
-               .runs[0].tool.driver.version = (.runs[0].tool.driver.version // "latest") |
-               .runs[0].tool.driver.semanticVersion = (.runs[0].tool.driver.version // "0.0.0") |
+               .runs[0].tool.driver.fullName = "Trivy ECR Image Vulnerability Scanner (" + $repo + ")" |
                .runs[0].tool.driver.rules = [.runs[0].tool.driver.rules[]? | 
-                 .shortDescription.text = "[Container: " + $repo + "] " + .shortDescription.text |
-                 .properties.tags = ((.properties.tags // []) + ["container-vulnerability", "ecr-image", "trivy", $repo])
+                 .shortDescription.text = "[" + $repo + "] " + .shortDescription.text |
+                 .properties.tags = ((.properties.tags // []) + ["container-vulnerability", "ecr-image", $repo])
                ] |
                .runs[0].results = [.runs[0].results[]? | 
-                 select(.ruleId != null and .message != null) |
-                 .locations = [
-                   {
-                     "physicalLocation": {
-                       "artifactLocation": {
-                         "uri": ("container-scan/" + $safeRepo + "/vulnerabilities.txt")
-                       },
-                       "region": {
-                         "startLine": 1,
-                         "startColumn": 1,
-                         "endLine": 1,
-                         "endColumn": 1
-                       }
-                     },
-                     "message": {
-                       "text": (.locations[0].message.text // "Container vulnerability")
-                     }
-                   }
-                 ] |
-                 .message.text = "ECR Container Vulnerability\n\nImage: " + $image + "\nRepository: " + $repo + "\nTag: " + $tag + "\n\n" + (.message.text // "")
+                 .message.text = "Image: " + $image + "\nRepository: " + $repo + "\nTag: " + $tag + "\n\n" + .message.text
                ] |
                .runs[0].automationDetails = {
                  "id": ("container-security/ecr-scan/" + $repo + "/" + $tag),
