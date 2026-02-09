@@ -203,17 +203,17 @@ jobs:
       - name: Display Vulnerabilities
         run: cat trivy-report.json | jq '.Results[].Vulnerabilities[] | {ID, PkgName, InstalledVersion, Severity, Title, Description}'
 
-      - name: Upload Report to S3
-        run: |
-          aws s3 cp trivy-report.json s3://tesbucketforactions/trivy-report.json
+      # - name: Upload Report to S3
+      #   run: |
+      #     aws s3 cp trivy-report.json s3://tesbucketforactions/trivy-report.json
 
-      - name: Install Python and Dependencies
-        run: pip install boto3
+      # - name: Install Python and Dependencies
+      #   run: pip install boto3
 
-      - name: Send Vulnerability Report via SES
-        run: |
-          pwd
-          python .github/ecr_email/send_email.py
+      # - name: Send Vulnerability Report via SES
+      #   run: |
+      #     pwd
+      #     python .github/ecr_email/send_email.py
       
       - name: Upload Trivy SARIF to GitHub Security Tab
         uses: github/codeql-action/upload-sarif@v4
