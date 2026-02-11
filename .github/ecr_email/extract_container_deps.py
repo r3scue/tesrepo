@@ -315,10 +315,13 @@ class ContainerDependencyAnalyzer:
             print("   No node_modules found")
             return 0
         
-        # First, try to find and parse package-lock.json (most accurate)
+        packages_from_lock = set()  # Track packages from lock file
+        
+        # First, try to find and parse package-lock.json (most accurate for nested deps)
         lock_files = self.find_package_lock_files()
+        packages_from_lock = set()
         if lock_files:
-            print(f"   Using package-lock.json for accurate dependency tree...")
+            print(f"   Using package-lock.json for nested dependency information...")
             for lock_file in lock_files:
                 content = self.read_container_file(lock_file)
                 if content:
@@ -329,36 +332,35 @@ class ContainerDependencyAnalyzer:
                         for pkg_name, deps in lock_deps.items():
                             self.dependency_map[pkg_name] = deps
                             self.package_ecosystem[pkg_name] = 'npm'
+                            packages_from_lock.add(pkg_name)
                         
-                        # Show sample and debug specific packages
+                        # Show sample
                         sample_count = 0
                         for pkg_name, deps in lock_deps.items():
                             if sample_count < 3:
                                 print(f"     • {pkg_name}: {len(deps)} dependencies")
                                 sample_count += 1
-                        
-                        # Debug: Check for tar specifically
-                        if 'tar' in lock_deps:
-                            print(f"     🔍 DEBUG: Found 'tar' with {len(lock_deps['tar'])} dependencies")
-                        if 'serverless' in lock_deps:
-                            print(f"     🔍 DEBUG: Found 'serverless' with dependencies: {lock_deps['serverless'][:5]}")
-                            if 'tar' in lock_deps['serverless']:
-                                print(f"     ✅ DEBUG: serverless → tar relationship exists!")
-                        
-                        print(f"   ✅ Parsed {len(lock_deps)} npm packages from package-lock.json")
-                        return len(lock_deps)
                 else:
                     print(f"   ⚠️ Could not read {lock_file}")
         
-        # Fallback: Parse individual package.json files
-        print(f"   Falling back to individual package.json files...")
+        # ALWAYS parse individual package.json files to get root-level packages
+        # that might not be in lock files (especially for globally installed packages)
+        print(f"   Parsing individual package.json files for top-level packages...")
+        
+        # ALWAYS parse individual package.json files to get root-level packages
+        # that might not be in lock files (especially for globally installed packages)
+        print(f"   Parsing individual package.json files for top-level packages...")
         package_files = self.find_npm_package_files(node_modules_paths)
         if not package_files:
             print("   No npm packages found")
+            if packages_from_lock:
+                print(f"   ✅ Using {len(packages_from_lock)} packages from package-lock.json only")
+                return len(packages_from_lock)
             return 0
         
-        print(f"   Parsing package.json files...")
+        print(f"   Found {len(package_files)} package.json files...")
         parsed_count = 0
+        skipped_count = 0
         
         for package_path in package_files:
             content = self.read_container_file(package_path)
@@ -368,6 +370,11 @@ class ContainerDependencyAnalyzer:
             pkg_name, version, deps = self.parse_npm_package_json(content)
             
             if pkg_name and pkg_name not in ['', '.', 'undefined']:
+                # Skip if already parsed from package-lock.json (lock file is more accurate)
+                if pkg_name in packages_from_lock:
+                    skipped_count += 1
+                    continue
+                
                 # Handle scoped packages (e.g., @types/node)
                 self.dependency_map[pkg_name] = deps
                 self.package_ecosystem[pkg_name] = 'npm'
@@ -390,8 +397,10 @@ class ContainerDependencyAnalyzer:
                     else:
                         print(f"     ⚠️ DEBUG: serverless does NOT list tar directly (might be transitive)")
         
-        print(f"   ✅ Parsed {parsed_count} npm packages")
-        return parsed_count
+        total_npm = len(packages_from_lock) + parsed_count
+        print(f"   ✅ Parsed {parsed_count} npm packages from package.json (skipped {skipped_count} already in lock file)")
+        print(f"   ✅ Total npm packages: {total_npm}")
+        return total_npm
     
     # ============================================================================
     # MAIN EXTRACTION
