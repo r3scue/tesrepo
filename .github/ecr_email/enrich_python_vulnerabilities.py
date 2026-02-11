@@ -119,6 +119,20 @@ class DependencyGraph:
                 
                 self.children_to_parents[child_purl].add(parent_purl)
                 self.parents_to_children[parent_purl].add(child_purl)
+        
+        # Debug: Check for tar specifically
+        for purl in self.components.keys():
+            pkg_name = self._get_package_name_from_purl(purl)
+            if pkg_name == 'tar':
+                parents = self.children_to_parents.get(purl, set())
+                print(f"   🔍 DEBUG: Found 'tar' in dependency graph with {len(parents)} parents")
+                if parents:
+                    for parent_purl in parents:
+                        parent_name = self._get_package_name_from_purl(parent_purl)
+                        print(f"      - Parent: {parent_name}")
+                else:
+                    print(f"      - No parents (will be marked as ROOT/DIRECT)")
+                break
     
     def get_stats(self) -> dict:
         """Get dependency graph statistics for debugging."""
