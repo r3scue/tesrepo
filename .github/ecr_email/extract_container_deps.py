@@ -177,7 +177,7 @@ class ContainerDependencyAnalyzer:
     def find_node_modules_paths(self) -> List[str]:
         """Find all node_modules directories in container."""
         code, output = self.run_container_command(
-            'find /usr/local /opt /app /home -type d -name "node_modules" 2>/dev/null || true',
+            'find /usr/local /usr/lib /opt /app /home -type d -name "node_modules" 2>/dev/null || true',
             timeout=45
         )
         
@@ -246,7 +246,7 @@ class ContainerDependencyAnalyzer:
     def find_package_lock_files(self) -> List[str]:
         """Find package-lock.json files in the container."""
         code, output = self.run_container_command(
-            'find /usr/local /opt /app /home -type f -name "package-lock.json" 2>/dev/null || true',
+            'find /usr/local /usr/lib /opt /app /home -type f -name "package-lock.json" 2>/dev/null || true',
             timeout=30
         )
         
