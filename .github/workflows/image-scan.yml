@@ -126,7 +126,7 @@ jobs:
             
             # Extract multi-ecosystem dependencies from container metadata to enhance SBOM
             echo "🔗 Extracting dependency relationships from container (Python, Node.js)..."
-            if python3 .github/scripts/extract_container_deps.py "$IMAGE_URI" sbom-base.json sbom.json; then
+            if python3 .github/ecr_email/extract_container_deps.py "$IMAGE_URI" sbom-base.json sbom.json; then
               echo "✅ Successfully enhanced SBOM with container dependency information"
             else
               echo "⚠️ Dependency extraction failed, using base SBOM"
@@ -169,7 +169,7 @@ jobs:
             # Enrich vulnerabilities with dependency analysis (Python, Node.js, etc.)
             echo "🔗 Enriching vulnerabilities with dependency chain analysis..."
             if [ -f sbom.json ] && [ -f trivy-report.json ]; then
-              python3 .github/scripts/enrich_python_vulnerabilities.py trivy-report.json sbom.json trivy-results-updated.sarif
+              python3 .github/ecr_email/enrich_python_vulnerabilities.py trivy-report.json sbom.json trivy-results-updated.sarif
               if [ $? -eq 0 ]; then
                 echo "✅ Vulnerability enrichment complete"
               else
