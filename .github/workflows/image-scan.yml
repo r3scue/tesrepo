@@ -20,6 +20,11 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v3
         with:
@@ -108,14 +113,16 @@ jobs:
             echo "📥 Pulling image $IMAGE_URI ..."
             docker pull "$IMAGE_URI"
             echo "Scanning $IMAGE_URI ..."
-            # sudo ifconfig eth0 down  # disable network temporarily
-            trivy image $IMAGE_URI --scanners vuln --skip-db-update --offline-scan --format json -o trivy-report.json 
-            # trivy image $IMAGE_URI --scanners vuln --skip-db-update --offline-scan --format sarif -o trivy-results.sarif
-            # sudo ifconfig eth0 up  # re-enable network
-            # jq --arg image "$IMAGE_URI" \
-            #   '.runs[0].results |= map(.message.text |= "[IMAGE: \($image)] " + .)' \
-            #   trivy-results.sarif > trivy-results-patched.sarif
+            
+            # Generate vulnerability reports and SBOM
+            echo "🔍 Generating Trivy vulnerability report (JSON)..."
+            trivy image $IMAGE_URI --scanners vuln --skip-db-update --offline-scan --format json -o trivy-report.json
+            
+            echo "🔍 Generating Trivy vulnerability report (SARIF)..."
             trivy image $IMAGE_URI --scanners vuln --skip-db-update --offline-scan --format sarif -o trivy-results-raw.sarif
+            
+            echo "📋 Generating CycloneDX SBOM for dependency analysis..."
+            trivy image $IMAGE_URI --format cyclonedx --scanners vuln --skip-db-update --offline-scan -o sbom.json
             
             # Enhance SARIF for clear identification in GitHub Security tab
             # Keep original structure intact, only add metadata for identification
@@ -149,6 +156,19 @@ jobs:
                    "text": ("Container vulnerability scan for ECR image: " + $image)
                  }
                }' trivy-results-raw.sarif > trivy-results-updated.sarif
+            
+            # Enrich Python vulnerabilities with dependency analysis
+            echo "🐍 Enriching Python vulnerabilities with dependency chain analysis..."
+            if [ -f sbom.json ] && [ -f trivy-report.json ]; then
+              python3 .github/ecr_email/enrich_python_vulnerabilities.py trivy-report.json sbom.json trivy-results-updated.sarif
+              if [ $? -eq 0 ]; then
+                echo "✅ Python vulnerability enrichment complete"
+              else
+                echo "⚠️ Python enrichment failed, continuing with base SARIF"
+              fi
+            else
+              echo "⚠️ SBOM or Trivy report missing, skipping Python enrichment"
+            fi
             
             # Validate SARIF structure
             echo "📋 Validating SARIF structure..."
