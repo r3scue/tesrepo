@@ -243,6 +243,69 @@ class ContainerDependencyAnalyzer:
         
         return package_name, version, dependencies
     
+    def find_package_lock_files(self) -> List[str]:
+        """Find package-lock.json files in the container."""
+        code, output = self.run_container_command(
+            'find /usr/local /opt /app /home -type f -name "package-lock.json" 2>/dev/null || true',
+            timeout=30
+        )
+        
+        files = [f.strip() for f in output.split('\n') if f.strip()]
+        if files:
+            print(f"🔒 Found {len(files)} package-lock.json files")
+        return files
+    
+    def parse_package_lock_json(self, content: str) -> Dict[str, List[str]]:
+        """
+        Parse package-lock.json to extract complete dependency tree.
+        Returns dict mapping package names to their direct dependencies.
+        """
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            return {}
+        
+        dependencies = {}
+        lockfile_version = data.get('lockfileVersion', 1)
+        
+        if lockfile_version >= 2:
+            # Modern format (v2/v3) uses "packages" with node_modules paths
+            packages = data.get('packages', {})
+            
+            for pkg_path, pkg_data in packages.items():
+                # Skip root package entry
+                if pkg_path == '':
+                    continue
+                
+                # Extract package name from path like "node_modules/tar" or "node_modules/serverless/node_modules/tar"
+                if pkg_path.startswith('node_modules/'):
+                    pkg_name = pkg_path.split('node_modules/')[-1]
+                    pkg_name = pkg_name.lower()
+                    
+                    # Get dependencies
+                    deps = []
+                    for dep in pkg_data.get('dependencies', {}).keys():
+                        deps.append(dep.lower())
+                    
+                    if pkg_name:
+                        dependencies[pkg_name] = deps
+        else:
+            # Legacy format (v1) uses "dependencies" object
+            def extract_v1_deps(deps_obj: dict, dependencies: dict):
+                """Recursively extract dependencies from v1 format."""
+                for pkg_name, pkg_data in deps_obj.items():
+                    pkg_name_lower = pkg_name.lower()
+                    requires = pkg_data.get('requires', {})
+                    dependencies[pkg_name_lower] = [dep.lower() for dep in requires.keys()]
+                    
+                    # Recurse into nested dependencies
+                    if 'dependencies' in pkg_data:
+                        extract_v1_deps(pkg_data['dependencies'], dependencies)
+            
+            extract_v1_deps(data.get('dependencies', {}), dependencies)
+        
+        return dependencies
+    
     def extract_npm_dependencies(self) -> int:
         """Extract npm dependency information from container."""
         print(f"\n📦 Analyzing npm packages...")
@@ -252,6 +315,33 @@ class ContainerDependencyAnalyzer:
             print("   No node_modules found")
             return 0
         
+        # First, try to find and parse package-lock.json (most accurate)
+        lock_files = self.find_package_lock_files()
+        if lock_files:
+            print(f"   Using package-lock.json for accurate dependency tree...")
+            for lock_file in lock_files:
+                content = self.read_container_file(lock_file)
+                if content:
+                    lock_deps = self.parse_package_lock_json(content)
+                    if lock_deps:
+                        print(f"   ✓ Extracted {len(lock_deps)} packages from {lock_file}")
+                        # Merge with existing dependency map
+                        for pkg_name, deps in lock_deps.items():
+                            self.dependency_map[pkg_name] = deps
+                            self.package_ecosystem[pkg_name] = 'npm'
+                        
+                        # Show sample
+                        sample_count = 0
+                        for pkg_name, deps in lock_deps.items():
+                            if sample_count < 3:
+                                print(f"     • {pkg_name}: {len(deps)} dependencies")
+                                sample_count += 1
+                        
+                        print(f"   ✅ Parsed {len(lock_deps)} npm packages from package-lock.json")
+                        return len(lock_deps)
+        
+        # Fallback: Parse individual package.json files
+        print(f"   Falling back to individual package.json files...")
         package_files = self.find_npm_package_files(node_modules_paths)
         if not package_files:
             print("   No npm packages found")
