@@ -377,6 +377,18 @@ class ContainerDependencyAnalyzer:
                 
                 if parsed_count <= 3:
                     print(f"   ✓ {pkg_name} {version or ''}: {len(deps)} dependencies")
+                
+                # Debug: Check for tar and serverless
+                if pkg_name == 'tar':
+                    print(f"     🔍 DEBUG: Found 'tar' package.json at {package_path}")
+                    print(f"     🔍 DEBUG: tar has {len(deps)} dependencies listed in package.json")
+                elif pkg_name == 'serverless':
+                    print(f"     🔍 DEBUG: Found 'serverless' package.json at {package_path}")
+                    print(f"     🔍 DEBUG: serverless dependencies: {deps[:10]}")
+                    if 'tar' in deps:
+                        print(f"     ✅ DEBUG: serverless lists tar as dependency!")
+                    else:
+                        print(f"     ⚠️ DEBUG: serverless does NOT list tar directly (might be transitive)")
         
         print(f"   ✅ Parsed {parsed_count} npm packages")
         return parsed_count
@@ -547,17 +559,40 @@ class SBOMEnhancer:
                     dep_ref_name = comp.get('name', '').lower()
                     break
             
-            if dep_ref_name == 'tar' and dep.get('dependsOn'):
-                print(f"   🔍 DEBUG: 'tar' has {len(dep['dependsOn'])} parents (should be empty for root, non-empty for transitive)")
-            elif dep_ref_name == 'serverless' and dep.get('dependsOn'):
-                tar_in_deps = False
-                for child_ref in dep['dependsOn']:
-                    for comp in self.sbom.get('components', []):
-                        if comp.get('bom-ref') == child_ref and comp.get('name', '').lower() == 'tar':
-                            tar_in_deps = True
-                            break
-                if tar_in_deps:
-                    print(f"   ✅ DEBUG: 'serverless' depends on 'tar' - relationship exists in SBOM!")
+            if dep_ref_name == 'tar':
+                if dep.get('dependsOn'):
+                    print(f"   ⚠️ DEBUG: 'tar' has {len(dep['dependsOn'])} dependencies in SBOM (should be empty)")
+                    # Show what tar depends on
+                    for child_ref in dep['dependsOn']:
+                        for comp in self.sbom.get('components', []):
+                            if comp.get('bom-ref') == child_ref:
+                                print(f"      - tar depends on: {comp.get('name', 'unknown')}")
+                                break
+                else:
+                    print(f"   ✅ DEBUG: 'tar' has NO dependencies in SBOM (correct for leaf package)")
+            elif dep_ref_name == 'serverless':
+                if dep.get('dependsOn'):
+                    tar_in_deps = False
+                    for child_ref in dep['dependsOn']:
+                        for comp in self.sbom.get('components', []):
+                            if comp.get('bom-ref') == child_ref and comp.get('name', '').lower() == 'tar':
+                                tar_in_deps = True
+                                break
+                    if tar_in_deps:
+                        print(f"   ✅ DEBUG: 'serverless' depends on 'tar' - relationship exists in SBOM!")
+                    else:
+                        print(f"   ⚠️ DEBUG: 'serverless' has {len(dep['dependsOn'])} dependencies but NOT tar")
+                        # Show first few dependencies
+                        count = 0
+                        for child_ref in dep['dependsOn']:
+                            if count < 5:
+                                for comp in self.sbom.get('components', []):
+                                    if comp.get('bom-ref') == child_ref:
+                                        print(f"      - serverless depends on: {comp.get('name', 'unknown')}")
+                                        count += 1
+                                        break
+                else:
+                    print(f"   ⚠️ DEBUG: 'serverless' has NO dependencies in SBOM!")
         
         if total_edges == 0:
             print("\n⚠️  Warning: No dependency edges created!")
