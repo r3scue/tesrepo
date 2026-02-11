@@ -169,7 +169,7 @@ jobs:
             # Enrich Python vulnerabilities with dependency analysis
             echo "🐍 Enriching Python vulnerabilities with dependency chain analysis..."
             if [ -f sbom.json ] && [ -f trivy-report.json ]; then
-              python3 .github/scripts/enrich_python_vulnerabilities.py trivy-report.json sbom.json trivy-results-updated.sarif
+              python3 .github/ecr_email/enrich_python_vulnerabilities.py trivy-report.json sbom.json trivy-results-updated.sarif
               if [ $? -eq 0 ]; then
                 echo "✅ Python vulnerability enrichment complete"
               else
