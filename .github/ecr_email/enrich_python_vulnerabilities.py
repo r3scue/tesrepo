@@ -33,12 +33,16 @@ class DependencyGraph:
         self.parents_to_children: Dict[str, Set[str]] = defaultdict(set)
         self._build_graph(sbom_data)
     
-    def _normalize_purl(self, purl: str) -> str:
-        """Normalize package URL for consistent matching."""
+    def _normalize_purl_for_lookup(self, purl: str) -> str:
+        """
+        Normalize package URL for name-based lookups (removes version).
+        e.g., pkg:pypi/requests@2.28.0 -> pkg:pypi/requests
+        
+        NOTE: Do NOT use this when building the graph - we need to keep
+        different versions as separate nodes!
+        """
         if not purl:
             return ""
-        # Remove version qualifiers for matching
-        # e.g., pkg:pypi/requests@2.28.0 -> pkg:pypi/requests
         if '@' in purl:
             return purl.split('@')[0]
         return purl
@@ -72,6 +76,7 @@ class DependencyGraph:
     def _build_graph(self, sbom_data: dict):
         """Build dependency graph from CycloneDX SBOM."""
         # Index components by purl and bom-ref
+        # IMPORTANT: Keep full purls with versions to handle multiple versions of same package
         components = sbom_data.get('components', [])
         bom_ref_to_purl = {}
         purl_to_bom_ref = {}
@@ -81,11 +86,11 @@ class DependencyGraph:
             bom_ref = component.get('bom-ref', '')
             
             if purl:
-                normalized = self._normalize_purl(purl)
-                self.components[normalized] = component
+                # Store with FULL purl (including version) to keep different versions distinct
+                self.components[purl] = component
                 if bom_ref:
-                    bom_ref_to_purl[bom_ref] = normalized
-                    purl_to_bom_ref[normalized] = bom_ref
+                    bom_ref_to_purl[bom_ref] = purl
+                    purl_to_bom_ref[purl] = bom_ref
         
         # Build parent-child relationships
         dependencies = sbom_data.get('dependencies', [])
@@ -98,9 +103,8 @@ class DependencyGraph:
             parent_purl = bom_ref_to_purl.get(parent_ref)
             if not parent_purl:
                 # Try direct purl match (some SBOMs use purl as ref)
-                normalized_ref = self._normalize_purl(parent_ref)
-                if normalized_ref in self.components:
-                    parent_purl = normalized_ref
+                if parent_ref in self.components:
+                    parent_purl = parent_ref
             
             if not parent_purl:
                 continue
@@ -109,10 +113,9 @@ class DependencyGraph:
                 # Try to resolve child - could be bom-ref or purl
                 child_purl = bom_ref_to_purl.get(child_ref)
                 if not child_purl:
-                    # Try direct purl match
-                    normalized_child = self._normalize_purl(child_ref)
-                    if normalized_child in self.components:
-                        child_purl = normalized_child
+                    # Try direct purl match (keep full version)
+                    if child_ref in self.components:
+                        child_purl = child_ref
                 
                 if not child_purl:
                     continue
@@ -167,15 +170,20 @@ class DependencyGraph:
             'total_dependency_edges': sum(len(parents) for parents in self.children_to_parents.values())
         }
     
-    def find_package_by_name(self, package_name: str) -> Optional[str]:
-        """Find package purl by name (case-insensitive, handles normalization)."""
+    def find_package_by_name(self, package_name: str) -> List[str]:
+        """
+        Find ALL package purls matching the given name (case-insensitive).
+        Returns list of purls for all versions of the package.
+        """
         target = package_name.lower().replace('_', '-')
+        matches = []
         
         for purl in self.components.keys():
             pkg_name = self._get_package_name_from_purl(purl)
             if pkg_name and pkg_name.lower().replace('_', '-') == target:
-                return purl
-        return None
+                matches.append(purl)
+        
+        return matches
     
     def get_root_dependencies(self, package_purl: str) -> List[List[str]]:
         """
@@ -295,29 +303,58 @@ class VulnerabilityEnricher:
         """
         Analyze dependency chain for a vulnerable package.
         
+        Handles multiple versions of the same package - prefers transitive
+        dependencies over direct dependencies when multiple versions exist.
+        
         Returns:
         {
             'is_direct': bool,
             'root_paths': List[List[str]],  # List of dependency paths
-            'status': 'resolved' | 'unresolved'
+            'status': 'resolved' | 'unresolved',
+            'version_count': int  # Number of versions found
         }
         """
-        package_purl = self.dependency_graph.find_package_by_name(package_name)
+        package_purls = self.dependency_graph.find_package_by_name(package_name)
         
-        if not package_purl:
+        if not package_purls:
             return {
                 'is_direct': False,
                 'root_paths': [],
-                'status': 'unresolved'
+                'status': 'unresolved',
+                'version_count': 0
             }
         
-        is_direct = self.dependency_graph.is_direct_dependency(package_purl)
-        root_paths = self.dependency_graph.get_root_dependencies(package_purl)
+        # If multiple versions exist, prefer the one with parents (transitive)
+        # This is more useful for showing dependency chains
+        best_purl = None
+        best_is_direct = True
+        best_paths = []
+        
+        for purl in package_purls:
+            is_direct = self.dependency_graph.is_direct_dependency(purl)
+            root_paths = self.dependency_graph.get_root_dependencies(purl)
+            
+            # Prefer transitive dependencies (they have more interesting paths)
+            if not is_direct and best_is_direct:
+                best_purl = purl
+                best_is_direct = is_direct
+                best_paths = root_paths
+            elif is_direct == best_is_direct:
+                # If both are direct or both are transitive, prefer one with more paths
+                if len(root_paths) > len(best_paths):
+                    best_purl = purl
+                    best_is_direct = is_direct
+                    best_paths = root_paths
+            elif not best_purl:
+                best_purl = purl
+                best_is_direct = is_direct
+                best_paths = root_paths
         
         return {
-            'is_direct': is_direct,
-            'root_paths': root_paths,
-            'status': 'resolved'
+            'is_direct': best_is_direct,
+            'root_paths': best_paths,
+            'status': 'resolved',
+            'version_count': len(package_purls)
         }
     
     def format_dependency_path(self, path_purls: List[str]) -> str:
