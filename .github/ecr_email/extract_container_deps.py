@@ -330,15 +330,25 @@ class ContainerDependencyAnalyzer:
                             self.dependency_map[pkg_name] = deps
                             self.package_ecosystem[pkg_name] = 'npm'
                         
-                        # Show sample
+                        # Show sample and debug specific packages
                         sample_count = 0
                         for pkg_name, deps in lock_deps.items():
                             if sample_count < 3:
                                 print(f"     • {pkg_name}: {len(deps)} dependencies")
                                 sample_count += 1
                         
+                        # Debug: Check for tar specifically
+                        if 'tar' in lock_deps:
+                            print(f"     🔍 DEBUG: Found 'tar' with {len(lock_deps['tar'])} dependencies")
+                        if 'serverless' in lock_deps:
+                            print(f"     🔍 DEBUG: Found 'serverless' with dependencies: {lock_deps['serverless'][:5]}")
+                            if 'tar' in lock_deps['serverless']:
+                                print(f"     ✅ DEBUG: serverless → tar relationship exists!")
+                        
                         print(f"   ✅ Parsed {len(lock_deps)} npm packages from package-lock.json")
                         return len(lock_deps)
+                else:
+                    print(f"   ⚠️ Could not read {lock_file}")
         
         # Fallback: Parse individual package.json files
         print(f"   Falling back to individual package.json files...")
@@ -457,6 +467,21 @@ class SBOMEnhancer:
         print(f"\n🔗 Building dependency relationships...")
         print(f"   SBOM components: {len(self.sbom.get('components', []))}")
         print(f"   Resolved references: {len(ref_map)}")
+        print(f"   Extracted dependency map: {len(dependency_map)} packages")
+        
+        # Debug: Check if tar and serverless are in the maps
+        if 'tar' in dependency_map:
+            print(f"   🔍 DEBUG: 'tar' found in extracted dependency_map")
+        if 'serverless' in dependency_map:
+            print(f"   🔍 DEBUG: 'serverless' found in extracted dependency_map")
+            if 'tar' in dependency_map['serverless']:
+                print(f"   ✅ DEBUG: 'serverless' lists 'tar' as a dependency in extracted data!")
+        
+        # Debug: Check if they're in the SBOM
+        tar_in_sbom = 'tar' in ref_map or 'tar' in purl_map
+        serverless_in_sbom = 'serverless' in ref_map or 'serverless' in purl_map
+        print(f"   🔍 DEBUG: 'tar' in SBOM ref maps: {tar_in_sbom}")
+        print(f"   🔍 DEBUG: 'serverless' in SBOM ref maps: {serverless_in_sbom}")
         
         # Create dependencies section
         dependencies = []
@@ -513,6 +538,26 @@ class SBOMEnhancer:
         print(f"   ✓ Created {len(dependencies)} dependency entries")
         print(f"   ✓ Matched {matched_packages} packages with dependencies")
         print(f"   ✓ Total dependency edges: {total_edges}")
+        
+        # Debug: Check specific packages
+        for dep in dependencies:
+            dep_ref_name = None
+            for comp in self.sbom.get('components', []):
+                if comp.get('bom-ref') == dep['ref']:
+                    dep_ref_name = comp.get('name', '').lower()
+                    break
+            
+            if dep_ref_name == 'tar' and dep.get('dependsOn'):
+                print(f"   🔍 DEBUG: 'tar' has {len(dep['dependsOn'])} parents (should be empty for root, non-empty for transitive)")
+            elif dep_ref_name == 'serverless' and dep.get('dependsOn'):
+                tar_in_deps = False
+                for child_ref in dep['dependsOn']:
+                    for comp in self.sbom.get('components', []):
+                        if comp.get('bom-ref') == child_ref and comp.get('name', '').lower() == 'tar':
+                            tar_in_deps = True
+                            break
+                if tar_in_deps:
+                    print(f"   ✅ DEBUG: 'serverless' depends on 'tar' - relationship exists in SBOM!")
         
         if total_edges == 0:
             print("\n⚠️  Warning: No dependency edges created!")
