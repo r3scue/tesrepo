@@ -81,27 +81,27 @@ jobs:
       - name: Scan Image with Trivy and Save Report
         run: |
           ECR_REPOS="${{ github.event.inputs.ecr_repos }}"
-          AWS_ACCOUNT_ID="801754344896"  # Replace with actual AWS account ID
+          AWS_ACCOUNT_ID="801754344896"
           REGION="us-west-2"
 
           IFS=',' read -r -a REPO_ARRAY <<< "$ECR_REPOS"
 
           for REPO in "${REPO_ARRAY[@]}"; do
             echo "🔍 Fetching latest image tag for $REPO..."
-            IMAGE_JSON=$(aws ecr describe-images --repository-name "$ECR_REPOS" --output json)
+            IMAGE_JSON=$(aws ecr describe-images --repository-name "$REPO" --output json)
 
-            # Safely extract the latest tagged image
-            LATEST_TAG=$(echo "$IMAGE_JSON" | jq -r '
-              .imageDetails
-              | map(select(.imageTags | type == "array" and length > 0))
-              | sort_by(.imagePushedAt)
-              | reverse
-              | .[0].imageTags[0]')
+              # Safely extract the latest tagged image
+              LATEST_TAG=$(echo "$IMAGE_JSON" | jq -r '
+                .imageDetails
+                | map(select(.imageTags | type == "array" and length > 0))
+                | sort_by(.imagePushedAt)
+                | reverse
+                | .[0].imageTags[0]')
 
-            if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
-              echo "❌ No tagged images found in ECR repository '$ECR_REPOS'."
-              exit 1
-            fi
+              if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
+                echo "❌ No tagged images found in ECR repository '$REPO'."
+                exit 1
+              fi
 
             IMAGE_URI="$AWS_ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPO:$LATEST_TAG"
             echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
@@ -110,36 +110,73 @@ jobs:
             echo "Scanning $IMAGE_URI ..."
             # sudo ifconfig eth0 down  # disable network temporarily
             trivy image $IMAGE_URI --scanners vuln --skip-db-update --offline-scan --format json -o trivy-report.json 
+            # trivy image $IMAGE_URI --scanners vuln --skip-db-update --offline-scan --format sarif -o trivy-results.sarif
+            # sudo ifconfig eth0 up  # re-enable network
+            # jq --arg image "$IMAGE_URI" \
+            #   '.runs[0].results |= map(.message.text |= "[IMAGE: \($image)] " + .)' \
+            #   trivy-results.sarif > trivy-results-patched.sarif
             trivy image $IMAGE_URI --scanners vuln --skip-db-update --offline-scan --format sarif -o trivy-results-raw.sarif
             
             # Enhance SARIF for clear identification in GitHub Security tab
-            # CRITICAL: Keep tool.driver.name as "Trivy" for GitHub compatibility
+            # Keep original structure intact, only add metadata for identification
+            # IMPORTANT: Remap artifact locations to a repo file so GitHub displays the alerts
             SAFE_REPO=$(echo "$REPO" | sed 's/[^a-zA-Z0-9_-]/_/g')
-           jq --arg repo "$REPO" \
-            '.runs[0].tool.driver.name = "Watchdog" |
-             .runs[0].tool.driver.rules = [
-               .runs[0].tool.driver.rules[]? |
-               .properties.tags = ((.properties.tags // []) + [$repo])
-             ] |
-             .runs[0].results = [
-               .runs[0].results[]? |
-               .message.text = ($repo + ": " + .message.text)
-             ]' \
-            trivy-results-raw.sarif > trivy-results.sarif
+            jq --arg image "$IMAGE_URI" \
+               --arg repo "$REPO" \
+               --arg tag "$LATEST_TAG" \
+               --arg workflow ".github/workflows/image-scan.yml" \
+               '
+               # Remove originalUriBaseIds that can conflict with relative paths
+               del(.runs[0].originalUriBaseIds) |
+               .runs[0].tool.driver.name = "MontyCloud Container Scanner" |
+               .runs[0].tool.driver.fullName = "MontyCloud ECR Image Vulnerability Scanner (" + $repo + ")" |
+               .runs[0].tool.driver.rules = [.runs[0].tool.driver.rules[]? | 
+                 .shortDescription.text = "[" + $repo + "] " + .shortDescription.text |
+                 .properties.tags = ((.properties.tags // []) + ["container-vulnerability", "ecr-image", $repo])
+               ] |
+               .runs[0].results = [.runs[0].results[]? | 
+                 # Store original container path in message
+                 .message.text = "Image: " + $image + "\nRepository: " + $repo + "\nTag: " + $tag + "\nContainer Path: " + (.locations[0].physicalLocation.artifactLocation.uri // "unknown") + "\n\n" + .message.text |
+                 # Remap location to workflow file so GitHub displays the alert
+                 .locations[0].physicalLocation.artifactLocation.uri = $workflow |
+                 # Remove uriBaseId - let GitHub treat path as relative to repo root
+                 del(.locations[0].physicalLocation.artifactLocation.uriBaseId) |
+                 .locations[0].physicalLocation.region = {"startLine": 1, "startColumn": 1, "endLine": 1, "endColumn": 1}
+               ] |
+               .runs[0].automationDetails = {
+                 "id": ("container-security/ecr-scan/" + $repo + "/" + $tag),
+                 "description": {
+                   "text": ("Container vulnerability scan for ECR image: " + $image)
+                 }
+               }' trivy-results-raw.sarif > trivy-results-updated.sarif
+            
+            # Validate SARIF structure
+            echo "📋 Validating SARIF structure..."
+            if jq empty trivy-results-updated.sarif 2>/dev/null; then
+              echo "✅ SARIF JSON is valid"
+            else
+              echo "❌ SARIF JSON is invalid!"
+              exit 1
+            fi
+            
+            # Debug: Show SARIF statistics
+            SARIF_RESULTS=$(jq '.runs[0].results | length' trivy-results-updated.sarif)
+            SARIF_RULES=$(jq '.runs[0].tool.driver.rules | length' trivy-results-updated.sarif)
+            HAS_URI_BASE=$(jq 'if .runs[0].originalUriBaseIds then "YES - PROBLEM!" else "NO - Good" end' trivy-results-updated.sarif)
+            FIRST_URI=$(jq -r '.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri' trivy-results-updated.sarif)
+            echo "📊 SARIF Statistics:"
+            echo "   - Results (vulnerabilities): $SARIF_RESULTS"
+            echo "   - Rules defined: $SARIF_RULES"
+            echo "   - Has originalUriBaseIds: $HAS_URI_BASE"
+            echo "   - First result URI: $FIRST_URI"
+            
+            if [ "$SARIF_RESULTS" -eq 0 ]; then
+              echo "⚠️ WARNING: No vulnerabilities in SARIF file - nothing will appear in Code Scanning"
+            fi
+            
+            echo "✅ Enhanced SARIF report generated for $IMAGE_URI"
+          done
 
-          
-                      
-                      # Validate SARIF structure
-                      echo "📋 Validating SARIF structure..."
-                      if jq empty trivy-results.sarif 2>/dev/null; then
-                        echo "✅ SARIF JSON is valid"
-                      else
-                        echo "❌ SARIF JSON is invalid!"
-                        exit 1
-                      fi
-                      
-                      echo "✅ Enhanced SARIF report generated for $IMAGE_URI"
-                    done
 
       # - name: Scan Image with Trivy and Save Report
       #   run: |
@@ -155,49 +192,57 @@ jobs:
             echo "✅ trivy-report.json exists!"
             ls -lh trivy-report.json
           fi
-      - name: Convert JSON to CSV
-        run: |
-          echo '"Image","VulnerabilityID","Package","Version","FixedVersion","Severity","Title"' > trivy-report.csv
 
-          jq -r --arg IMAGE "$IMAGE_URI" '.Results[].Vulnerabilities[] |
-          [
-           $IMAGE,
-           .VulnerabilityID,
-           .PkgName,
-           .InstalledVersion,
-           .FixedVersion,
-           .Severity,
-           .Title
-           ] | @csv
-           ' trivy-report.json >> trivy-report.csv
-          
       - name: Upload Vulnerability Report
         uses: actions/upload-artifact@v4
         with:
           name: trivy-report
           path: trivy-report.json
-          
+
+      - name: Upload SARIF for debugging
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-sarif
+          path: trivy-results-updated.sarif
+
+      # - name: Display Vulnerabilities
+      #   run: cat trivy-report.json | jq '.Results[].Vulnerabilities[] | {ID, PkgName, InstalledVersion, Severity, Title, Description}'
+
+
+      - name: Convert JSON to CSV
+        run: |
+              echo '"Image","VulnerabilityID","Package","Version","FixedVersion","Severity","Title","References","PublishedDate","LastModifiedDate","Class","Type","Layer"' > trivy-report.csv
+
+              jq -r --arg IMAGE "$IMAGE_URI" '
+                .Results[]
+                | select(.Vulnerabilities != null)
+                | . as $result
+                | $result.Vulnerabilities[]
+                | [
+                    $IMAGE,
+                    .VulnerabilityID,
+                    .PkgName,
+                    .InstalledVersion,
+                    .FixedVersion,
+                    .Severity,
+                    .Title,
+                    (.References // [] | join(" ")),
+                    .PublishedDate,
+                    .LastModifiedDate,
+                    $result.Class,
+                    $result.Type,
+                    (.Layer.DiffID // "")
+                  ]
+                | @csv
+              ' trivy-report.json >> trivy-report.csv
+
+
       - name: Upload Vulnerability CSV Report
         uses: actions/upload-artifact@v4
         with:
           name: trivy-csv
           path: trivy-report.csv
-
-      - name: Upload SARIF Report as Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-sarif
-          path: trivy-results.sarif
-
-      - name: Upload SARIF Report as Artifacss
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-sarif-raw
-          path: trivy-results-raw.sarif
-          
-      - name: Display Vulnerabilities
-        run: cat trivy-report.json | jq '.Results[].Vulnerabilities[] | {ID, PkgName, InstalledVersion, Severity, Title, Description}'
-
+      
       # - name: Upload Report to S3
       #   run: |
       #     aws s3 cp trivy-report.json s3://tesbucketforactions/trivy-report.json
@@ -209,18 +254,99 @@ jobs:
       #   run: |
       #     pwd
       #     python .github/ecr_email/send_email.py
+      #   env:
+      #     IMAGE_URI: ${{ env.IMAGE_URI }}
       
+      # - name: Upload Trivy SARIF to GitHub Security tab
+      #   uses: github/codeql-action/upload-sarif@v4
+      #   with:
+      #     sarif_file: trivy-results.sarif
+
       - name: Upload Trivy SARIF to GitHub Security Tab
+        id: upload-sarif
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: trivy-results-raw.sarif
-          category: trivvy-ecr
+          sarif_file: trivy-results-updated.sarif
           # Category helps distinguish container scans from other code scanning results
-        continue-on-error: true  # Don't fail the workflow if upload fails
+          category: "container-security/ecr-image-scan"
+          # NOTE: Run this workflow from your default branch (dev) to see alerts in Security tab
+
+      - name: Verify Code Scanning Upload
+        if: always()
+        run: |
+          echo "🔍 Checking Code Scanning alerts after upload..."
+          
+          # Wait for processing
+          sleep 20
+          
+          # Query alerts with ALL states (open, dismissed, fixed)
+          echo "📊 Querying alerts with all states..."
+          for STATE in open dismissed fixed; do
+            RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/code-scanning/alerts?state=$STATE&per_page=100")
+            TOTAL=$(echo "$RESPONSE" | jq 'if type == "array" then length else 0 end')
+            OUR=$(echo "$RESPONSE" | jq '[.[] | select(.tool.name == "MontyCloud Container Scanner")] | length')
+            echo "  State '$STATE': Total=$TOTAL, Ours=$OUR"
+          done
+          
+          # Query alerts filtered by our tool name
+          echo ""
+          echo "🔍 Querying alerts by tool_name parameter..."
+          OUR_ALERTS=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/code-scanning/alerts?tool_name=MontyCloud%20Container%20Scanner&per_page=100")
+          OUR_COUNT=$(echo "$OUR_ALERTS" | jq 'if type == "array" then length else 0 end')
+          echo "🐳 Alerts from MontyCloud Container Scanner: $OUR_COUNT"
+          
+          if [ "$OUR_COUNT" -gt 0 ]; then
+            echo "✅ Found our container scan alerts!"
+            echo "$OUR_ALERTS" | jq '.[0:5] | .[] | {number, rule: .rule.id, state, created_at, most_recent_instance}'
+          else
+            echo "⚠️ No alerts from our scanner found via tool_name filter"
+          fi
+          
+          # Check analyses
+          echo ""
+          echo "📤 Checking recent Code Scanning analyses..."
+          ANALYSES=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/code-scanning/analyses?per_page=10")
+          
+          echo "Recent analyses:"
+          echo "$ANALYSES" | jq '.[0:5] | .[] | {id, tool: .tool.name, created_at, results_count, category, ref, commit_sha, warning}'
+          
+          # Get our latest analysis with full details
+          OUR_ANALYSIS=$(echo "$ANALYSES" | jq '[.[] | select(.tool.name == "MontyCloud Container Scanner")] | .[0]')
+          ANALYSIS_ID=$(echo "$OUR_ANALYSIS" | jq -r '.id // empty')
+          
+          if [ -n "$ANALYSIS_ID" ]; then
+            echo ""
+            echo "🔎 Our analysis details (ID: $ANALYSIS_ID):"
+            echo "$OUR_ANALYSIS" | jq '{id, results_count, category, sarif_id, created_at, ref, commit_sha, warning, error, deletable}'
+            
+            # Check the ref - alerts only show on default branch
+            ANALYSIS_REF=$(echo "$OUR_ANALYSIS" | jq -r '.ref // empty')
+            echo ""
+            echo "📌 Analysis ref: $ANALYSIS_REF"
+            echo "📌 Current ref: ${{ github.ref }}"
+            echo "📌 Default branch: ${{ github.event.repository.default_branch }}"
+            
+            if [[ "$ANALYSIS_REF" != "refs/heads/${{ github.event.repository.default_branch }}" ]]; then
+              echo ""
+              echo "⚠️ WARNING: Analysis is NOT on default branch!"
+              echo "   Alerts only appear in Security tab for the DEFAULT BRANCH"
+              echo "   Run this workflow on '${{ github.event.repository.default_branch }}' to see alerts"
+            fi
+          fi
+          
+          # Check what branch we're on
+          echo ""
+          echo "🌿 Branch information:"
+          echo "   github.ref = ${{ github.ref }}"
+          echo "   github.head_ref = ${{ github.head_ref }}"
+          echo "   github.base_ref = ${{ github.base_ref }}"
 
       - name: Check for Critical or High Vulnerabilities
         run: |
-          echo "### � ECR Container Vulnerability Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "### 🐳 ECR Container Vulnerability Scan Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Scanned Image:** \`$IMAGE_URI\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -245,7 +371,7 @@ jobs:
             echo "::warning file=trivy-report.json::⚠️ Critical or High container vulnerabilities found in ECR image!"
             echo "⚠️ **Action Required:** Critical or High vulnerabilities were detected in the container image." >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "📋 View detailed findings in the **Security** tab under **Code scanning alerts** → filter by **container-security/ecr-image-scan**" >> $GITHUB_STEP_SUMMARY
+            # echo "📋 View detailed findings in the **Security** tab under **Code scanning alerts** → filter by **container-security/ecr-image-scan**" >> $GITHUB_STEP_SUMMARY
           else
             echo "✅ No Critical or High container vulnerabilities found." >> $GITHUB_STEP_SUMMARY
           fi
