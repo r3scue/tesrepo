@@ -192,10 +192,10 @@ class ContainerDependencyAnalyzer:
         
         for nm_path in node_modules_paths:
             # Find all package.json files within this node_modules
-            # Limit depth to avoid excessive scanning
+            # Increased depth to capture nested dependencies (e.g., serverless/node_modules/tar)
             code, output = self.run_container_command(
-                f'find {nm_path} -maxdepth 2 -type f -name "package.json" 2>/dev/null || true',
-                timeout=30
+                f'find {nm_path} -maxdepth 8 -type f -name "package.json" 2>/dev/null || true',
+                timeout=60
             )
             
             files = [f.strip() for f in output.split('\n') if f.strip()]
