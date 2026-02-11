@@ -192,10 +192,11 @@ class ContainerDependencyAnalyzer:
         
         for nm_path in node_modules_paths:
             # Find all package.json files within this node_modules
-            # Increased depth to capture nested dependencies (e.g., serverless/node_modules/tar)
+            # Use maxdepth 2 for top-level packages (e.g., node_modules/serverless/package.json)
+            # This is faster and package-lock.json handles nested dependencies
             code, output = self.run_container_command(
-                f'find {nm_path} -maxdepth 8 -type f -name "package.json" 2>/dev/null || true',
-                timeout=60
+                f'find {nm_path} -maxdepth 2 -type f -name "package.json" 2>/dev/null || true',
+                timeout=30
             )
             
             files = [f.strip() for f in output.split('\n') if f.strip()]
@@ -346,10 +347,6 @@ class ContainerDependencyAnalyzer:
         # ALWAYS parse individual package.json files to get root-level packages
         # that might not be in lock files (especially for globally installed packages)
         print(f"   Parsing individual package.json files for top-level packages...")
-        
-        # ALWAYS parse individual package.json files to get root-level packages
-        # that might not be in lock files (especially for globally installed packages)
-        print(f"   Parsing individual package.json files for top-level packages...")
         package_files = self.find_npm_package_files(node_modules_paths)
         if not package_files:
             print("   No npm packages found")
@@ -362,7 +359,15 @@ class ContainerDependencyAnalyzer:
         parsed_count = 0
         skipped_count = 0
         
-        for package_path in package_files:
+        # Add progress tracking for large file counts
+        total_files = len(package_files)
+        progress_interval = max(100, total_files // 10)  # Report every 10% or at least every 100 files
+        
+        for i, package_path in enumerate(package_files, 1):
+            # Show progress for large numbers of files
+            if i % progress_interval == 0 or i == total_files:
+                print(f"   Progress: {i}/{total_files} files processed...")
+            
             content = self.read_container_file(package_path)
             if not content:
                 continue
