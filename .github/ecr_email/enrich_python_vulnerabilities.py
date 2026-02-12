@@ -28,37 +28,33 @@ class DependencyGraph:
     """Build and query a dependency graph from CycloneDX SBOM."""
     
     def __init__(self, sbom_data: dict):
-        self.components: Dict[str, dict] = {}
-        self.children_to_parents: Dict[str, Set[str]] = defaultdict(set)
-        self.parents_to_children: Dict[str, Set[str]] = defaultdict(set)
+        self.components_by_purl: Dict[str, dict] = {}
+        self.name_index: Dict[str, List[str]] = defaultdict(list)
+        self.parents: Dict[str, Set[str]] = defaultdict(set)
+        self.children: Dict[str, Set[str]] = defaultdict(set)
         self._build_graph(sbom_data)
-    
-    def _normalize_purl_for_lookup(self, purl: str) -> str:
-        """
-        Normalize package URL for name-based lookups (removes version).
-        e.g., pkg:pypi/requests@2.28.0 -> pkg:pypi/requests
-        
-        NOTE: Do NOT use this when building the graph - we need to keep
-        different versions as separate nodes!
-        """
-        if not purl:
-            return ""
-        if '@' in purl:
-            return purl.split('@')[0]
-        return purl
     
     def _get_package_name_from_purl(self, purl: str) -> Optional[str]:
         """Extract package name from purl for any ecosystem."""
         if not purl:
             return None
         
-        # Handle multiple ecosystems: pkg:pypi/name, pkg:npm/name, etc.
         # Format: pkg:ECOSYSTEM/package-name@version
         match = re.match(r'pkg:([^/]+)/([^@]+)', purl)
         if match:
-            ecosystem = match.group(1)
-            package_name = match.group(2)
-            return package_name
+            return match.group(2)
+        
+        return None
+    
+    def _get_version_from_purl(self, purl: str) -> Optional[str]:
+        """Extract version from purl."""
+        if not purl or '@' not in purl:
+            return None
+        
+        # Format: pkg:ECOSYSTEM/package-name@version
+        parts = purl.split('@')
+        if len(parts) >= 2:
+            return parts[-1]
         
         return None
     
@@ -76,10 +72,9 @@ class DependencyGraph:
     def _build_graph(self, sbom_data: dict):
         """Build dependency graph from CycloneDX SBOM."""
         # Index components by purl and bom-ref
-        # IMPORTANT: Keep full purls with versions to handle multiple versions of same package
+        # Keep full purls with versions to handle multiple versions of same package
         components = sbom_data.get('components', [])
         bom_ref_to_purl = {}
-        purl_to_bom_ref = {}
         
         for component in components:
             purl = component.get('purl', '')
@@ -87,10 +82,15 @@ class DependencyGraph:
             
             if purl:
                 # Store with FULL purl (including version) to keep different versions distinct
-                self.components[purl] = component
+                self.components_by_purl[purl] = component
+                
+                # Build name index for reverse lookups
+                pkg_name = self._get_package_name_from_purl(purl)
+                if pkg_name:
+                    self.name_index[pkg_name.lower()].append(purl)
+                
                 if bom_ref:
                     bom_ref_to_purl[bom_ref] = purl
-                    purl_to_bom_ref[purl] = bom_ref
         
         # Build parent-child relationships
         dependencies = sbom_data.get('dependencies', [])
@@ -164,59 +164,83 @@ class DependencyGraph:
     def get_stats(self) -> dict:
         """Get dependency graph statistics for debugging."""
         return {
-            'total_components': len(self.components),
-            'packages_with_parents': len([p for p in self.components if self.children_to_parents.get(p)]),
-            'packages_without_parents': len([p for p in self.components if not self.children_to_parents.get(p)]),
-            'total_dependency_edges': sum(len(parents) for parents in self.children_to_parents.values())
+            'total_components': len(self.components_by_purl),
+            'packages_with_parents': len([p for p in self.components_by_purl if self.parents.get(p)]),
+            'packages_without_parents': len([p for p in self.components_by_purl if not self.parents.get(p)]),
+            'total_dependency_edges': sum(len(parents) for parents in self.parents.values())
         }
+    
+    def find_exact_purl(self, name: str, version: str, ecosystem: str) -> Optional[str]:
+        """
+        Find exact package URL matching name, version, and ecosystem.
+        Returns the purl if found, None otherwise.
+        """
+        # Construct expected purl
+        expected_purl = f"pkg:{ecosystem}/{name}@{version}"
+        
+        if expected_purl in self.components_by_purl:
+            return expected_purl
+        
+        # Try case-insensitive search in name index
+        normalized_name = name.lower()
+        if normalized_name in self.name_index:
+            for purl in self.name_index[normalized_name]:
+                purl_version = self._get_version_from_purl(purl)
+                purl_ecosystem = self._get_ecosystem_from_purl(purl)
+                
+                if purl_version == version and purl_ecosystem == ecosystem:
+                    return purl
+        
+        return None
     
     def find_package_by_name(self, package_name: str) -> List[str]:
         """
         Find ALL package purls matching the given name (case-insensitive).
         Returns list of purls for all versions of the package.
         """
-        target = package_name.lower().replace('_', '-')
-        matches = []
+        normalized_name = package_name.lower().replace('_', '-')
         
-        for purl in self.components.keys():
-            pkg_name = self._get_package_name_from_purl(purl)
-            if pkg_name and pkg_name.lower().replace('_', '-') == target:
-                matches.append(purl)
+        # Direct lookup in name index
+        if normalized_name in self.name_index:
+            return list(self.name_index[normalized_name])
+        
+        # Fallback: fuzzy search with normalization
+        matches = []
+        for indexed_name, purls in self.name_index.items():
+            if indexed_name.replace('_', '-') == normalized_name:
+                matches.extend(purls)
         
         return matches
     
-    def get_root_dependencies(self, package_purl: str) -> List[List[str]]:
+    def get_root_paths(self, package_purl: str) -> List[List[str]]:
         """
         Find all root dependencies that introduce this package.
         Returns list of dependency paths from root to package.
         """
         paths = []
-        visited = set()
         
         def dfs(current: str, path: List[str]):
             """DFS to find all paths to root dependencies."""
-            if current in visited and current in path:
-                # Circular dependency detected, stop
+            # Circular dependency protection
+            if current in path:
                 return
             
-            parents = self.children_to_parents.get(current, set())
+            parent_purls = self.parents.get(current, set())
             
-            if not parents:
+            if not parent_purls:
                 # Root dependency found
                 paths.append(list(reversed(path)))
                 return
             
-            visited.add(current)
-            for parent in sorted(parents):  # Sort for determinism
+            for parent in sorted(parent_purls):  # Sort for determinism
                 dfs(parent, path + [parent])
-            visited.discard(current)
         
         dfs(package_purl, [package_purl])
         
-        # Deduplicate and sort paths
+        # Deduplicate and sort paths by length (prefer shorter paths)
         unique_paths = []
         seen = set()
-        for path in sorted(paths, key=len):  # Prefer shorter paths
+        for path in sorted(paths, key=len):
             path_key = tuple(path)
             if path_key not in seen:
                 unique_paths.append(path)
@@ -226,11 +250,11 @@ class DependencyGraph:
     
     def is_direct_dependency(self, package_purl: str) -> bool:
         """Check if package is a direct (root) dependency."""
-        return len(self.children_to_parents.get(package_purl, set())) == 0
+        return len(self.parents.get(package_purl, set())) == 0
 
 
 class VulnerabilityEnricher:
-    """Enrich SARIF vulnerability reports with Python dependency analysis."""
+    """Enrich SARIF vulnerability reports with dependency analysis."""
     
     def __init__(self, trivy_report_path: str, sbom_path: str, sarif_path: str):
         self.trivy_report_path = Path(trivy_report_path)
@@ -267,7 +291,6 @@ class VulnerabilityEnricher:
             if stats['total_dependency_edges'] == 0:
                 print("⚠️  WARNING: No dependency relationships found in SBOM!")
                 print("   All packages will be marked as 'direct dependencies'")
-                print("   This may indicate the SBOM is missing dependency information")
             
             return True
             
@@ -278,42 +301,73 @@ class VulnerabilityEnricher:
             print(f"❌ Error: Invalid JSON: {e}", file=sys.stderr)
             return False
     
-    def get_ecosystem_vulnerabilities(self) -> Dict[str, List[dict]]:
+    def get_ecosystem_vulnerabilities(self) -> Dict[Tuple[str, str, str], dict]:
         """
         Extract vulnerabilities from Trivy report for supported ecosystems.
-        Returns dict mapping package names to vulnerability details.
+        Returns dict mapping (CVE, PkgName, Version) to vulnerability details.
         
         Supported ecosystems: python-pkg (pip), node-pkg (npm)
         """
-        ecosystem_vulns = defaultdict(list)
+        vulnerability_map = {}
         
         for result in self.trivy_data.get('Results', []):
             result_type = result.get('Type', '')
             
-            # Process Python and Node.js library vulnerabilities
-            if result_type in ('python-pkg', 'node-pkg', 'npm'):
-                for vuln in result.get('Vulnerabilities', []):
-                    pkg_name = vuln.get('PkgName', '')
-                    if pkg_name:
-                        ecosystem_vulns[pkg_name].append(vuln)
+            # Determine ecosystem
+            ecosystem = None
+            if result_type == 'python-pkg':
+                ecosystem = 'pypi'
+            elif result_type in ('node-pkg', 'npm'):
+                ecosystem = 'npm'
+            else:
+                continue
+            
+            for vuln in result.get('Vulnerabilities', []):
+                pkg_name = vuln.get('PkgName', '')
+                installed_version = vuln.get('InstalledVersion', '')
+                vuln_id = vuln.get('VulnerabilityID', '')
+                
+                if pkg_name and installed_version and vuln_id:
+                    # Use composite key
+                    key = (vuln_id, pkg_name, installed_version)
+                    if key not in vulnerability_map:
+                        vulnerability_map[key] = {
+                            'vuln': vuln,
+                            'ecosystem': ecosystem
+                        }
         
-        return ecosystem_vulns
+        return vulnerability_map
     
-    def analyze_dependency(self, package_name: str) -> dict:
+    def analyze_dependency(self, package_name: str, version: str, ecosystem: str) -> dict:
         """
         Analyze dependency chain for a vulnerable package.
-        
-        Handles multiple versions of the same package - prefers transitive
-        dependencies over direct dependencies when multiple versions exist.
         
         Returns:
         {
             'is_direct': bool,
             'root_paths': List[List[str]],  # List of dependency paths
-            'status': 'resolved' | 'unresolved',
-            'version_count': int  # Number of versions found
+            'status': 'resolved' | 'version_mismatch' | 'unresolved',
+            'matched_purl': str | None,
+            'has_circular': bool
         }
         """
+        # Try exact match first
+        exact_purl = self.dependency_graph.find_exact_purl(package_name, version, ecosystem)
+        
+        if exact_purl:
+            root_paths = self.dependency_graph.get_root_paths(exact_purl)
+            is_direct = self.dependency_graph.is_direct_dependency(exact_purl)
+            has_circular = any(len(path) != len(set(path)) for path in root_paths)
+            
+            return {
+                'is_direct': is_direct,
+                'root_paths': root_paths,
+                'status': 'resolved',
+                'matched_purl': exact_purl,
+                'has_circular': has_circular
+            }
+        
+        # Fallback: name-based matching (version mismatch)
         package_purls = self.dependency_graph.find_package_by_name(package_name)
         
         if not package_purls:
@@ -321,40 +375,22 @@ class VulnerabilityEnricher:
                 'is_direct': False,
                 'root_paths': [],
                 'status': 'unresolved',
-                'version_count': 0
+                'matched_purl': None,
+                'has_circular': False
             }
         
-        # If multiple versions exist, prefer the one with parents (transitive)
-        # This is more useful for showing dependency chains
-        best_purl = None
-        best_is_direct = True
-        best_paths = []
-        
-        for purl in package_purls:
-            is_direct = self.dependency_graph.is_direct_dependency(purl)
-            root_paths = self.dependency_graph.get_root_dependencies(purl)
-            
-            # Prefer transitive dependencies (they have more interesting paths)
-            if not is_direct and best_is_direct:
-                best_purl = purl
-                best_is_direct = is_direct
-                best_paths = root_paths
-            elif is_direct == best_is_direct:
-                # If both are direct or both are transitive, prefer one with more paths
-                if len(root_paths) > len(best_paths):
-                    best_purl = purl
-                    best_is_direct = is_direct
-                    best_paths = root_paths
-            elif not best_purl:
-                best_purl = purl
-                best_is_direct = is_direct
-                best_paths = root_paths
+        # Use first match (sorted for determinism)
+        fallback_purl = sorted(package_purls)[0]
+        root_paths = self.dependency_graph.get_root_paths(fallback_purl)
+        is_direct = self.dependency_graph.is_direct_dependency(fallback_purl)
+        has_circular = any(len(path) != len(set(path)) for path in root_paths)
         
         return {
-            'is_direct': best_is_direct,
-            'root_paths': best_paths,
-            'status': 'resolved',
-            'version_count': len(package_purls)
+            'is_direct': is_direct,
+            'root_paths': root_paths,
+            'status': 'version_mismatch',
+            'matched_purl': fallback_purl,
+            'has_circular': has_circular
         }
     
     def format_dependency_path(self, path_purls: List[str]) -> str:
@@ -368,154 +404,124 @@ class VulnerabilityEnricher:
     
     def enrich_sarif(self) -> bool:
         """Enrich SARIF file with multi-ecosystem dependency analysis."""
-        ecosystem_vulns = self.get_ecosystem_vulnerabilities()
+        vuln_map = self.get_ecosystem_vulnerabilities()
         
-        if not ecosystem_vulns:
+        if not vuln_map:
             print("ℹ️  No ecosystem vulnerabilities found. SARIF unchanged.")
             return True
         
-        print(f"🔍 Found {sum(len(v) for v in ecosystem_vulns.values())} vulnerabilities across {len(ecosystem_vulns)} packages")
-        
-        # Build a mapping of CVE ID -> package names for quick lookup
-        cve_to_packages = defaultdict(set)
-        for pkg_name, vulns in ecosystem_vulns.items():
-            for vuln in vulns:
-                vuln_id = vuln.get('VulnerabilityID', '')
-                if vuln_id:
-                    cve_to_packages[vuln_id].add(pkg_name)
+        print(f"🔍 Found {len(vuln_map)} unique vulnerabilities to enrich")
         
         enriched_count = 0
         unresolved_count = 0
+        version_mismatch_count = 0
         
         # Process each SARIF run
         for run in self.sarif_data.get('runs', []):
             results = run.get('results', [])
             
             for result in results:
-                # Try multiple methods to extract package name
-                pkg_name = None
+                # Extract vulnerability information from SARIF result
+                rule_id = result.get('ruleId', '')  # CVE ID
                 
-                # Method 1: Use ruleId (CVE ID) to lookup package
-                rule_id = result.get('ruleId', '')
-                if rule_id and rule_id in cve_to_packages:
-                    # Get all packages affected by this CVE
-                    affected_packages = cve_to_packages[rule_id]
-                    if len(affected_packages) == 1:
-                        pkg_name = list(affected_packages)[0]
-                    else:
-                        # Multiple packages, try to disambiguate from message
-                        pkg_name = self._extract_package_name_from_result(result)
-                        if pkg_name and pkg_name in affected_packages:
-                            # Use the extracted name if it matches
-                            pass
-                        else:
-                            # Fallback to first package
-                            pkg_name = sorted(list(affected_packages))[0]  # Sort for determinism
-                else:
-                    # Method 2: Extract from message text
-                    pkg_name = self._extract_package_name_from_result(result)
+                # Extract package name and version from message
+                pkg_name, pkg_version = self._extract_package_info_from_result(result)
                 
-                if not pkg_name or pkg_name not in ecosystem_vulns:
+                if not pkg_name or not pkg_version or not rule_id:
                     continue
                 
+                # Look up vulnerability using composite key
+                vuln_key = (rule_id, pkg_name, pkg_version)
+                vuln_data = vuln_map.get(vuln_key)
+                
+                if not vuln_data:
+                    # Try alternate keys (case variations)
+                    for key in vuln_map.keys():
+                        if key[0] == rule_id and key[1].lower() == pkg_name.lower() and key[2] == pkg_version:
+                            vuln_data = vuln_map[key]
+                            break
+                
+                if not vuln_data:
+                    continue
+                
+                ecosystem = vuln_data['ecosystem']
+                
                 # Analyze dependency
-                analysis = self.analyze_dependency(pkg_name)
+                analysis = self.analyze_dependency(pkg_name, pkg_version, ecosystem)
                 
                 # Build enrichment text
-                enrichment = self._build_enrichment_text(pkg_name, analysis)
+                enrichment = self._build_enrichment_text(pkg_name, pkg_version, analysis)
                 
                 # Append to message
                 current_message = result['message']['text']
                 result['message']['text'] = f"{current_message}\n\n{enrichment}"
                 
-                if analysis['status'] == 'resolved':
-                    enriched_count += 1
-                else:
+                enriched_count += 1
+                if analysis['status'] == 'unresolved':
                     unresolved_count += 1
+                elif analysis['status'] == 'version_mismatch':
+                    version_mismatch_count += 1
         
-        print(f"✅ Enriched {enriched_count} Python vulnerabilities")
+        print(f"✅ Enriched {enriched_count} vulnerabilities")
+        if version_mismatch_count > 0:
+            print(f"⚠️  {version_mismatch_count} vulnerabilities used version fallback")
         if unresolved_count > 0:
             print(f"⚠️  {unresolved_count} vulnerabilities could not be mapped to SBOM")
         
         return True
     
-    def _extract_package_name_from_result(self, result: dict) -> Optional[str]:
-        """Extract package name from SARIF result."""
-        # Trivy SARIF format stores package info in multiple places
-        
+    def _extract_package_info_from_result(self, result: dict) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Extract package name and version from SARIF result.
+        Returns (package_name, version) or (None, None) if not found.
+        """
         message = result.get('message', {}).get('text', '')
-        
-        # Try to extract package name from various patterns
-        # Pattern 1: Look for lines like "Package: xyz" or "PkgName: xyz"
         lines = message.split('\n')
+        
+        pkg_name = None
+        pkg_version = None
+        
+        # Parse Trivy message format
         for line in lines:
-            if line.strip().startswith('Package:'):
-                return line.split(':', 1)[1].strip()
-            if line.strip().startswith('PkgName:'):
-                return line.split(':', 1)[1].strip()
+            line_stripped = line.strip()
+            
+            # Look for Package: or PkgName:
+            if line_stripped.startswith('Package:'):
+                pkg_name = line_stripped.split(':', 1)[1].strip()
+            elif line_stripped.startswith('PkgName:'):
+                pkg_name = line_stripped.split(':', 1)[1].strip()
+            
+            # Look for Installed Version: or InstalledVersion:
+            if line_stripped.startswith('Installed Version:'):
+                pkg_version = line_stripped.split(':', 1)[1].strip()
+            elif line_stripped.startswith('InstalledVersion:'):
+                pkg_version = line_stripped.split(':', 1)[1].strip()
+            elif line_stripped.startswith('Version:') and not pkg_version:
+                pkg_version = line_stripped.split(':', 1)[1].strip()
         
-        # Pattern 2: Look for purl format in message (multi-ecosystem)
-        if 'pkg:pypi/' in message or 'pkg:npm/' in message:
-            import re
-            match = re.search(r'pkg:(pypi|npm)/([a-zA-Z0-9._@/-]+)', message)
-            if match:
-                return match.group(2)  # Return package name (with potential @ scope for npm)
+        # Fallback: parse purl if present
+        if not pkg_name or not pkg_version:
+            for line in lines:
+                if 'pkg:' in line:
+                    match = re.search(r'pkg:(pypi|npm)/([^@\s]+)@([^\s]+)', line)
+                    if match:
+                        if not pkg_name:
+                            pkg_name = match.group(2)
+                        if not pkg_version:
+                            pkg_version = match.group(3)
         
-        # Pattern 3: Parse the original Trivy message after the enrichment header
-        # Look for common vulnerability message patterns
-        # E.g., "python-package 1.2.3 is affected by CVE-..."
-        import re
-        
-        # After the "Container Path:" line, look for package name in next lines
-        # Container Path often contains: /path/to/package_name/
-        for i, line in enumerate(lines):
-            if 'Container Path:' in line:
-                path = line.split(':', 1)[1].strip() if ':' in line else ''
-                
-                # Extract from Python path like "/usr/local/lib/python3.9/site-packages/urllib3"
-                if '/site-packages/' in path:
-                    pkg = path.split('/site-packages/')[-1].strip('/')
-                    # Remove any trailing path components
-                    pkg = pkg.split('/')[0]
-                    if pkg:
-                        return pkg
-                
-                # Extract from Node.js path like "/opt/app/node_modules/express"
-                if '/node_modules/' in path:
-                    pkg = path.split('/node_modules/')[-1].strip('/')
-                    # Remove any trailing path components
-                    pkg = pkg.split('/')[0]
-                    if pkg:
-                        return pkg
-                
-                # Also check the next non-empty line after Container Path
-                if i + 1 < len(lines):
-                    next_lines = lines[i+1:]
-                    for next_line in next_lines:
-                        if not next_line.strip():
-                            continue
-                        # Pattern: "package-name version has CVE-..."
-                        match = re.match(r'^([a-zA-Z0-9._-]+)\s+[\d.]+', next_line.strip())
-                        if match:
-                            return match.group(1)
-                        # Pattern: "Package package-name"
-                        match = re.search(r'[Pp]ackage\s+([a-zA-Z0-9._-]+)', next_line)
-                        if match:
-                            return match.group(1)
-                        break
-                break
-        
-        return None
+        return (pkg_name, pkg_version)
     
-    def _build_enrichment_text(self, package_name: str, analysis: dict) -> str:
+    def _build_enrichment_text(self, package_name: str, version: str, analysis: dict) -> str:
         """Build enrichment text for SARIF message."""
         if analysis['status'] == 'unresolved':
             return (
                 "─────────────────────────────────\n"
                 "📦 Dependency Analysis:\n"
                 f"   Package: {package_name}\n"
+                f"   Version: {version}\n"
                 "   Status: Could not resolve dependency chain\n"
-                "   Note: Package not found in SBOM or dependency graph incomplete"
+                "   Note: Package not found in SBOM"
             )
         
         text_parts = [
@@ -524,36 +530,40 @@ class VulnerabilityEnricher:
         ]
         
         # Check if we have any dependency information at all
-        total_edges = sum(len(parents) for parents in self.dependency_graph.children_to_parents.values())
+        total_edges = sum(len(parents) for parents in self.dependency_graph.parents.values())
+        
+        version_mismatch_note = ""
+        if analysis['status'] == 'version_mismatch':
+            matched_version = self.dependency_graph._get_version_from_purl(analysis['matched_purl'])
+            version_mismatch_note = f" (matched version {matched_version} in SBOM)"
         
         if analysis['is_direct']:
             if total_edges == 0:
-                # No dependency graph available
-                text_parts.append(f"   • Package: {package_name}")
-                text_parts.append(f"   • Status: Installed in container")
-                text_parts.append(f"   • Note: Dependency graph unavailable - cannot determine if direct or transitive")
-                text_parts.append(f"   • Common in: Container images where SBOM lacks dependency relationships")
+                text_parts.append(f"   • Direct dependency: ✓ (no dependency relationships in SBOM)")
+                text_parts.append(f"   • Package: {package_name}@{version}")
             else:
-                # True direct dependency
-                text_parts.append(f"   • Direct dependency: ✓ (root package)")
-                text_parts.append(f"   • Package: {package_name}")
+                text_parts.append(f"   • Direct dependency: ✓{version_mismatch_note}")
+                text_parts.append(f"   • Package: {package_name}@{version}")
         else:
-            text_parts.append(f"   • Direct dependency: ✗ (transitive)")
-            text_parts.append(f"   • Vulnerable package: {package_name}")
+            text_parts.append(f"   • Direct dependency: ✗ (transitive){version_mismatch_note}")
+            text_parts.append(f"   • Vulnerable package: {package_name}@{version}")
             
             root_paths = analysis['root_paths']
             if root_paths:
-                text_parts.append("   • Introduced by:")
+                # Show shortest path
+                shortest_path = min(root_paths, key=len)
+                formatted_path = self.format_dependency_path(shortest_path)
+                text_parts.append(f"   • Dependency chain:")
+                text_parts.append(f"     {formatted_path}")
                 
-                # Show up to 5 paths to avoid overwhelming the message
-                for i, path in enumerate(root_paths[:5]):
-                    formatted_path = self.format_dependency_path(path)
-                    text_parts.append(f"      {i+1}. {formatted_path}")
-                
-                if len(root_paths) > 5:
-                    text_parts.append(f"      ... and {len(root_paths) - 5} more path(s)")
-            else:
-                text_parts.append("   • Introduced by: Could not determine root package")
+                if len(root_paths) > 1:
+                    text_parts.append(f"   • Additional paths: {len(root_paths) - 1} more")
+        
+        if analysis['has_circular']:
+            text_parts.append(f"   • Circular dependency: ✓ (detected in graph)")
+        
+        if analysis['status'] == 'version_mismatch':
+            text_parts.append(f"   • Version matched exactly: ✗ (using fallback)")
         
         return '\n'.join(text_parts)
     
@@ -573,16 +583,12 @@ class VulnerabilityEnricher:
         try:
             # Check basic structure
             if 'runs' not in self.sarif_data:
-                print("❌ Invalid SARIF: missing 'runs'", file=sys.stderr)
+                print("❌ SARIF missing 'runs' field", file=sys.stderr)
                 return False
             
             for run in self.sarif_data['runs']:
-                if 'results' not in run:
-                    print("❌ Invalid SARIF: missing 'results' in run", file=sys.stderr)
-                    return False
-                
-                if 'tool' not in run or 'driver' not in run['tool']:
-                    print("❌ Invalid SARIF: missing 'tool.driver'", file=sys.stderr)
+                if 'tool' not in run or 'results' not in run:
+                    print("❌ SARIF run missing required fields", file=sys.stderr)
                     return False
             
             print("✅ SARIF validation passed")
