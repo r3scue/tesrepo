@@ -99,67 +99,30 @@ class DependencyGraph:
             parent_ref = dep_entry.get('ref', '')
             child_refs = dep_entry.get('dependsOn', [])
             
-            # Try to resolve parent - could be bom-ref or purl
+            # Resolve parent - could be bom-ref or purl
             parent_purl = bom_ref_to_purl.get(parent_ref)
             if not parent_purl:
                 # Try direct purl match (some SBOMs use purl as ref)
-                if parent_ref in self.components:
+                if parent_ref in self.components_by_purl:
                     parent_purl = parent_ref
             
             if not parent_purl:
                 continue
             
             for child_ref in child_refs:
-                # Try to resolve child - could be bom-ref or purl
+                # Resolve child - could be bom-ref or purl
                 child_purl = bom_ref_to_purl.get(child_ref)
                 if not child_purl:
-                    # Try direct purl match (keep full version)
-                    if child_ref in self.components:
+                    if child_ref in self.components_by_purl:
                         child_purl = child_ref
                 
                 if not child_purl:
                     continue
                 
-                self.children_to_parents[child_purl].add(parent_purl)
-                self.parents_to_children[parent_purl].add(child_purl)
+                self.parents[child_purl].add(parent_purl)
+                self.children[parent_purl].add(child_purl)
         
-        # Debug: Check for tar and serverless specifically (may have multiple versions)
-        tar_instances = []
-        serverless_instances = []
-        for purl in self.components.keys():
-            pkg_name = self._get_package_name_from_purl(purl)
-            if pkg_name == 'tar':
-                tar_instances.append(purl)
-            elif pkg_name == 'serverless':
-                serverless_instances.append(purl)
-        
-        # Check all tar instances
-        if tar_instances:
-            print(f"   🔍 DEBUG: Found {len(tar_instances)} 'tar' instances in dependency graph")
-            for i, tar_purl in enumerate(tar_instances, 1):
-                parents = self.children_to_parents.get(tar_purl, set())
-                if parents:
-                    print(f"      Instance {i}: {len(parents)} parents")
-                    for parent_purl in list(parents)[:3]:
-                        parent_name = self._get_package_name_from_purl(parent_purl)
-                        print(f"         - Parent: {parent_name}")
-                else:
-                    print(f"      Instance {i}: No parents (ROOT/DIRECT)")
-        
-        # Check serveless instances
-        if serverless_instances:
-            print(f"   🔍 DEBUG: Found {len(serverless_instances)} 'serverless' instances in dependency graph")
-            for i, serverless_purl in enumerate(serverless_instances, 1):
-                children = self.parents_to_children.get(serverless_purl, set())
-                print(f"      Instance {i}: {len(children)} children")
-                tar_children = [c for c in children if self._get_package_name_from_purl(c) == 'tar']
-                if tar_children:
-                    print(f"         ✅ Has tar as child: {len(tar_children)} tar instance(s)")
-                elif children:
-                    # Show first few children
-                    for j, child_purl in enumerate(list(children)[:3], 1):
-                        child_name = self._get_package_name_from_purl(child_purl)
-                        print(f"         - Child {j}: {child_name}")
+
     
     def get_stats(self) -> dict:
         """Get dependency graph statistics for debugging."""
