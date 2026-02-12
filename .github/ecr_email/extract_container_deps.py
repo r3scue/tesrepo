@@ -328,19 +328,12 @@ class ContainerDependencyAnalyzer:
                 if content:
                     lock_deps = self.parse_package_lock_json(content)
                     if lock_deps:
-                        print(f"   ✓ Extracted {len(lock_deps)} packages from {lock_file}")
+                        print(f"   ✓ Extracted {len(lock_deps)} packages from package-lock.json")
                         # Merge with existing dependency map
                         for pkg_name, deps in lock_deps.items():
                             self.dependency_map[pkg_name] = deps
                             self.package_ecosystem[pkg_name] = 'npm'
                             packages_from_lock.add(pkg_name)
-                        
-                        # Show sample
-                        sample_count = 0
-                        for pkg_name, deps in lock_deps.items():
-                            if sample_count < 3:
-                                print(f"     • {pkg_name}: {len(deps)} dependencies")
-                                sample_count += 1
                 else:
                     print(f"   ⚠️ Could not read {lock_file}")
         
@@ -355,18 +348,11 @@ class ContainerDependencyAnalyzer:
                 return len(packages_from_lock)
             return 0
         
-        print(f"   Found {len(package_files)} package.json files...")
+        print(f"   Found {len(package_files)} package.json files to parse...")
         parsed_count = 0
         skipped_count = 0
         
-        # Add progress tracking for large file counts
-        total_files = len(package_files)
-        progress_interval = max(100, total_files // 10)  # Report every 10% or at least every 100 files
-        
-        for i, package_path in enumerate(package_files, 1):
-            # Show progress for large numbers of files
-            if i % progress_interval == 0 or i == total_files:
-                print(f"   Progress: {i}/{total_files} files processed...")
+        for package_path in package_files:
             
             content = self.read_container_file(package_path)
             if not content:
@@ -495,20 +481,6 @@ class SBOMEnhancer:
         print(f"   Resolved references: {len(ref_map)}")
         print(f"   Extracted dependency map: {len(dependency_map)} packages")
         
-        # Debug: Check if tar and serverless are in the maps
-        if 'tar' in dependency_map:
-            print(f"   🔍 DEBUG: 'tar' found in extracted dependency_map")
-        if 'serverless' in dependency_map:
-            print(f"   🔍 DEBUG: 'serverless' found in extracted dependency_map")
-            if 'tar' in dependency_map['serverless']:
-                print(f"   ✅ DEBUG: 'serverless' lists 'tar' as a dependency in extracted data!")
-        
-        # Debug: Check if they're in the SBOM
-        tar_in_sbom = 'tar' in ref_map or 'tar' in purl_map
-        serverless_in_sbom = 'serverless' in ref_map or 'serverless' in purl_map
-        print(f"   🔍 DEBUG: 'tar' in SBOM ref maps: {tar_in_sbom}")
-        print(f"   🔍 DEBUG: 'serverless' in SBOM ref maps: {serverless_in_sbom}")
-        
         # Create dependencies section
         dependencies = []
         matched_packages = 0
@@ -564,49 +536,6 @@ class SBOMEnhancer:
         print(f"   ✓ Created {len(dependencies)} dependency entries")
         print(f"   ✓ Matched {matched_packages} packages with dependencies")
         print(f"   ✓ Total dependency edges: {total_edges}")
-        
-        # Debug: Check specific packages
-        for dep in dependencies:
-            dep_ref_name = None
-            for comp in self.sbom.get('components', []):
-                if comp.get('bom-ref') == dep['ref']:
-                    dep_ref_name = comp.get('name', '').lower()
-                    break
-            
-            if dep_ref_name == 'tar':
-                if dep.get('dependsOn'):
-                    print(f"   ⚠️ DEBUG: 'tar' has {len(dep['dependsOn'])} dependencies in SBOM (should be empty)")
-                    # Show what tar depends on
-                    for child_ref in dep['dependsOn']:
-                        for comp in self.sbom.get('components', []):
-                            if comp.get('bom-ref') == child_ref:
-                                print(f"      - tar depends on: {comp.get('name', 'unknown')}")
-                                break
-                else:
-                    print(f"   ✅ DEBUG: 'tar' has NO dependencies in SBOM (correct for leaf package)")
-            elif dep_ref_name == 'serverless':
-                if dep.get('dependsOn'):
-                    tar_in_deps = False
-                    for child_ref in dep['dependsOn']:
-                        for comp in self.sbom.get('components', []):
-                            if comp.get('bom-ref') == child_ref and comp.get('name', '').lower() == 'tar':
-                                tar_in_deps = True
-                                break
-                    if tar_in_deps:
-                        print(f"   ✅ DEBUG: 'serverless' depends on 'tar' - relationship exists in SBOM!")
-                    else:
-                        print(f"   ⚠️ DEBUG: 'serverless' has {len(dep['dependsOn'])} dependencies but NOT tar")
-                        # Show first few dependencies
-                        count = 0
-                        for child_ref in dep['dependsOn']:
-                            if count < 5:
-                                for comp in self.sbom.get('components', []):
-                                    if comp.get('bom-ref') == child_ref:
-                                        print(f"      - serverless depends on: {comp.get('name', 'unknown')}")
-                                        count += 1
-                                        break
-                else:
-                    print(f"   ⚠️ DEBUG: 'serverless' has NO dependencies in SBOM!")
         
         if total_edges == 0:
             print("\n⚠️  Warning: No dependency edges created!")
