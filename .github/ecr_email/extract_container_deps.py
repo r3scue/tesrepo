@@ -510,6 +510,12 @@ class SBOMEnhancer:
         print(f"   Ecosystem-specific refs: {len(ecosystem_ref_map)}")
         print(f"   Extracted dependency map: {len(dependency_map)} packages")
         
+        # Start with EXISTING dependencies from Trivy's SBOM (don't lose them!)
+        existing_dependencies = {dep['ref']: set(dep.get('dependsOn', [])) 
+                                 for dep in self.sbom.get('dependencies', [])}
+        existing_deps_count = sum(len(deps) for deps in existing_dependencies.values())
+        print(f"   Existing dependencies from Trivy: {existing_deps_count} edges")
+        
         # Debug: Show some sample entries
         if dependency_map:
             print(f"\n📋 Sample dependency_map entries:")
@@ -532,9 +538,10 @@ class SBOMEnhancer:
                     npm_count += 1
             print(f"   Total: {pypi_count} pypi, {npm_count} npm in sample")
         
-        # Create dependencies section
+        # Merge with extracted dependencies
         dependencies = []
         matched_packages = 0
+        new_edges = 0
         total_edges = 0
         unmatched_deps = defaultdict(list)  # Track which deps couldn't be matched
         
@@ -553,9 +560,11 @@ class SBOMEnhancer:
                     component_ecosystem = eco_prefix.replace('pkg:', '').rstrip('/')
                     break
             
-            # Get dependencies for this package
+            # Start with existing dependencies from Trivy (if any)
+            depends_on = list(existing_dependencies.get(ref, []))
+            
+            # Get dependencies extracted from container metadata
             deps = dependency_map.get(name, [])
-            depends_on = []
             
             for dep_name in deps:
                 dep_ref = None
@@ -595,18 +604,21 @@ class SBOMEnhancer:
                     dep_ref = purl_map.get(unscoped)
                     matched_method = "unscoped"
                 
-                if dep_ref and dep_ref != ref:  # Avoid self-reference
+                # Add if found and not already in list (avoid duplicates) and not self-reference
+                if dep_ref and dep_ref != ref and dep_ref not in depends_on:
                     depends_on.append(dep_ref)
+                    new_edges += 1
                 elif not dep_ref:
                     # Track unmatched for debugging
                     unmatched_deps[name].append(dep_name)
             
-            if depends_on:
-                matched_packages += 1
+            if len(depends_on) > 0:
+                if deps:  # Count as matched if we added new deps
+                    matched_packages += 1
                 total_edges += len(depends_on)
                 # Debug: Show first few successful matches
-                if matched_packages <= 3:
-                    print(f"\n   ✓ {name} ({component_ecosystem}): {len(depends_on)} deps matched")
+                if matched_packages <= 3 and deps:
+                    print(f"\n   ✓ {name} ({component_ecosystem}): {len(depends_on)} total deps ({len(deps)} extracted)")
                     for dep_ref in depends_on[:3]:
                         print(f"      → {dep_ref}")
             
@@ -621,11 +633,12 @@ class SBOMEnhancer:
             for pkg, deps in list(unmatched_deps.items())[:5]:
                 print(f"      {pkg} → {deps[:5]}")
         
-        # Update SBOM
+        # Update SBOM with merged dependencies
         self.sbom['dependencies'] = dependencies
         
-        print(f"   ✓ Created {len(dependencies)} dependency entries")
-        print(f"   ✓ Matched {matched_packages} packages with dependencies")
+        print(f"\n   ✓ Created {len(dependencies)} dependency entries")
+        print(f"   ✓ Preserved {existing_deps_count} edges from Trivy")
+        print(f"   ✓ Added {new_edges} new edges from container metadata")
         print(f"   ✓ Total dependency edges: {total_edges}")
         
         if total_edges == 0:
@@ -634,6 +647,13 @@ class SBOMEnhancer:
             print("   - Package names don't match between SBOM and metadata")
             print("   - Container has no dependent packages")
             print("   - Metadata files are incomplete")
+        elif new_edges == 0 and existing_deps_count > 0:
+            print("\n⚠️  Warning: No NEW dependencies extracted from container!")
+            print("   Using only Trivy's existing dependencies")
+            print("   This might indicate:")
+            print("   - Metadata files not found or not readable")
+            print("   - Package name matching failed")
+            print("   - Dependencies already captured by Trivy")
     
     def save(self, output_path: str) -> None:
         """Save enhanced SBOM."""
