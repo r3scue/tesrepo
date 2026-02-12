@@ -440,6 +440,68 @@ class SBOMEnhancer:
         with open(sbom_path) as f:
             self.sbom = json.load(f)
     
+    def infer_npm_dependencies_from_paths(self) -> Dict[str, List[str]]:
+        """
+        Infer npm parent-child relationships from node_modules file paths.
+        
+        Pattern: .../node_modules/PARENT/node_modules/CHILD/package.json
+        → CHILD is a dependency of PARENT
+        
+        This is more reliable than parsing package.json files because:
+        - Uses actual installed structure
+        - No file system access needed (paths are in SBOM)
+        - Handles nested/transitive dependencies correctly
+        """
+        path_based_deps = defaultdict(list)
+        
+        # Build mapping: component name → file path
+        component_paths = {}
+        for component in self.sbom.get('components', []):
+            name = component.get('name', '').lower()
+            purl = component.get('purl', '')
+            
+            # Only process npm packages
+            if 'pkg:npm/' not in purl:
+                continue
+            
+            # Extract file path from properties
+            props = component.get('properties', [])
+            for prop in props:
+                if 'FilePath' in prop.get('name', ''):
+                    path = prop.get('value', '')
+                    component_paths[name] = path
+                    break
+        
+        # Analyze paths to infer relationships
+        for child_name, child_path in component_paths.items():
+            # Example path: usr/lib/node_modules/serverless/node_modules/string-width/package.json
+            # Split by 'node_modules/' to analyze nesting
+            parts = child_path.split('/node_modules/')
+            
+            if len(parts) >= 2:
+                # Get the package directory immediately before this package
+                # parts[-2] contains the parent path, extract parent name from it
+                parent_segment = parts[-2]
+                
+                # Extract parent package name from path
+                # Handle scoped packages like @scope/package
+                parent_parts = parent_segment.split('/')
+                
+                if parent_parts:
+                    # Get the last segment(s) as parent name
+                    if len(parent_parts) >= 2 and parent_parts[-2].startswith('@'):
+                        # Scoped package: @scope/name
+                        parent_name = f"{parent_parts[-2]}/{parent_parts[-1]}".lower()
+                    else:
+                        # Regular package
+                        parent_name = parent_parts[-1].lower()
+                    
+                    if parent_name and parent_name != child_name:
+                        if child_name not in path_based_deps[parent_name]:
+                            path_based_deps[parent_name].append(child_name)
+        
+        return dict(path_based_deps)
+    
     def enhance_with_dependencies(
         self, 
         dependency_map: Dict[str, List[str]],
@@ -503,12 +565,30 @@ class SBOMEnhancer:
                     if purl_name_hyphen not in purl_map:
                         purl_map[purl_name_hyphen] = ref
         
+        # Infer npm dependencies from file paths (fixes orphan packages)
+        print(f"\n🔍 Inferring npm dependencies from node_modules paths...")
+        path_based_deps = self.infer_npm_dependencies_from_paths()
+        print(f"   ✓ Inferred {len(path_based_deps)} parent packages from paths")
+        path_edges = sum(len(children) for children in path_based_deps.values())
+        print(f"   ✓ Inferred {path_edges} parent-child relationships")
+        
+        # Merge path-based deps into dependency_map
+        for parent, children in path_based_deps.items():
+            if parent in dependency_map:
+                # Add to existing
+                existing = set(dependency_map[parent])
+                existing.update(children)
+                dependency_map[parent] = list(existing)
+            else:
+                # New entry from path analysis
+                dependency_map[parent] = children
+        
         print(f"\n🔗 Building dependency relationships...")
         print(f"   SBOM components: {len(self.sbom.get('components', []))}")
         print(f"   Resolved references (ref_map): {len(ref_map)}")
         print(f"   Resolved PURLs (purl_map): {len(purl_map)}")
         print(f"   Ecosystem-specific refs: {len(ecosystem_ref_map)}")
-        print(f"   Extracted dependency map: {len(dependency_map)} packages")
+        print(f"   Extracted dependency map: {len(dependency_map)} packages (includes path-inferred)")
         
         # Start with EXISTING dependencies from Trivy's SBOM (don't lose them!)
         existing_dependencies = {dep['ref']: set(dep.get('dependsOn', [])) 
