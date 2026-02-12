@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Set, Tuple, Optional
 from collections import defaultdict
+from urllib.parse import unquote
 
 
 class DependencyGraph:
@@ -44,7 +45,9 @@ class DependencyGraph:
         # Format: pkg:ECOSYSTEM/package-name@version
         match = re.match(r'pkg:([^/]+)/([^@]+)', purl)
         if match:
-            return match.group(2)
+            # Decode URL encoding (e.g., %40 → @)
+            package_name = unquote(match.group(2))
+            return package_name
         
         return None
     
