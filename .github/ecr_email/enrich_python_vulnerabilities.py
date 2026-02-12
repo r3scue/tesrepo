@@ -372,6 +372,21 @@ class VulnerabilityEnricher:
     
     def enrich_sarif(self) -> bool:
         """Enrich SARIF file with multi-ecosystem dependency analysis."""
+        # Show dependency graph statistics first
+        print(f"\n📊 Dependency Graph Statistics:")
+        stats = self.dependency_graph.get_stats()
+        print(f"   Total components: {stats['total_components']}")
+        print(f"   Packages with parents: {stats['packages_with_parents']}")
+        print(f"   Packages without parents (direct deps): {stats['packages_without_parents']}")
+        print(f"   Total dependency edges: {stats['total_dependency_edges']}")
+        
+        if stats['total_dependency_edges'] == 0:
+            print(f"\n⚠️  WARNING: No dependency relationships found in SBOM!")
+            print(f"   This means:")
+            print(f"   - All packages will be classified as 'direct'")
+            print(f"   - No transitive dependency chains can be shown")
+            print(f"   - The extract_container_deps.py script may have failed")
+        
         vuln_map = self.get_ecosystem_vulnerabilities()
         
         if not vuln_map:
