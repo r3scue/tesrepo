@@ -590,17 +590,11 @@ class VulnerabilityEnricher:
                 # Show all paths (user wants to see all paths)
                 text_parts.append(f"   • Dependency chain{' (multiple paths)' if len(root_paths) > 1 else ''}:")
                 
-                # Sort by length (shortest first) and show up to 5 paths
-                max_paths_to_show = 5
-                for idx, path in enumerate(sorted(root_paths, key=len)[:max_paths_to_show]):
+                # Sort by length (shortest first) and show ALL paths
+                for idx, path in enumerate(sorted(root_paths, key=len)):
                     formatted_path = self.format_dependency_path(path)
-                    if idx == 0:
-                        text_parts.append(f"     {formatted_path}")
-                    else:
-                        text_parts.append(f"     {formatted_path}")
-                
-                if len(root_paths) > max_paths_to_show:
-                    text_parts.append(f"     ... and {len(root_paths) - max_paths_to_show} more paths")
+                    text_parts.append(f"     {formatted_path}")
+
             else:
                 # Transitive but no paths found (shouldn't happen with correct graph)
                 text_parts.append(f"   • Dependency chain: Unable to trace to root")
