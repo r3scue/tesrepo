@@ -247,7 +247,8 @@ class DependencyGraph:
     def is_direct_dependency(self, purl: str) -> bool:
         """
         Check if package is a direct (root) dependency.
-        A purl is direct if ANY of its instances has no parents.
+        A purl is direct ONLY if ALL of its instances have no parents.
+        If any instance has parents (transitive), we want to show those paths.
         """
         # Check all bom-refs for this purl
         bom_refs = self.purl_to_bom_refs.get(purl, [])
@@ -256,12 +257,19 @@ class DependencyGraph:
         if not bom_refs and purl in self.parents:
             bom_refs = [purl]
         
-        # Direct if any instance has no parents
-        for bom_ref in bom_refs:
-            if len(self.parents.get(bom_ref, set())) == 0:
-                return True
+        if not bom_refs:
+            # No instances found, assume direct
+            return True
         
-        return False
+        # Direct ONLY if ALL instances have no parents
+        # If any instance has parents, we have transitive paths to show
+        for bom_ref in bom_refs:
+            if len(self.parents.get(bom_ref, set())) > 0:
+                # At least one instance has parents -> not purely direct
+                return False
+        
+        # All instances have no parents
+        return True
 
 
 class VulnerabilityEnricher:
