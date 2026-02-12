@@ -184,21 +184,26 @@ class DependencyGraph:
         
         def dfs(current: str, path: List[str]):
             """DFS to find all paths to root dependencies."""
-            # Circular dependency protection
+            # Circular dependency protection - check before adding to path
             if current in path:
                 return
+            
+            # Add current node to path for this branch
+            current_path = path + [current]
             
             parent_purls = self.parents.get(current, set())
             
             if not parent_purls:
-                # Root dependency found
-                paths.append(list(reversed(path)))
+                # Root dependency found - reverse to show root → ... → target
+                paths.append(list(reversed(current_path)))
                 return
             
+            # Recurse to parents with updated path
             for parent in sorted(parent_purls):  # Sort for determinism
-                dfs(parent, path + [parent])
+                dfs(parent, current_path)
         
-        dfs(package_purl, [package_purl])
+        # Start DFS with empty path
+        dfs(package_purl, [])
         
         # Deduplicate and sort paths by length (prefer shorter paths)
         unique_paths = []
@@ -521,6 +526,10 @@ class VulnerabilityEnricher:
                 
                 if len(root_paths) > 1:
                     text_parts.append(f"   • Additional paths: {len(root_paths) - 1} more")
+            else:
+                # Transitive but no paths found (shouldn't happen with correct graph)
+                text_parts.append(f"   • Dependency chain: Unable to trace to root")
+                text_parts.append(f"   • Note: Package has dependencies but path resolution failed")
         
         if analysis['has_circular']:
             text_parts.append(f"   • Circular dependency: ✓ (detected in graph)")
