@@ -375,18 +375,6 @@ class ContainerDependencyAnalyzer:
                 
                 if parsed_count <= 3:
                     print(f"   ✓ {pkg_name} {version or ''}: {len(deps)} dependencies")
-                
-                # Debug: Check for tar and serverless
-                if pkg_name == 'tar':
-                    print(f"     🔍 DEBUG: Found 'tar' package.json at {package_path}")
-                    print(f"     🔍 DEBUG: tar has {len(deps)} dependencies listed in package.json")
-                elif pkg_name == 'serverless':
-                    print(f"     🔍 DEBUG: Found 'serverless' package.json at {package_path}")
-                    print(f"     🔍 DEBUG: serverless dependencies: {deps[:10]}")
-                    if 'tar' in deps:
-                        print(f"     ✅ DEBUG: serverless lists tar as dependency!")
-                    else:
-                        print(f"     ⚠️ DEBUG: serverless does NOT list tar directly (might be transitive)")
         
         total_npm = len(packages_from_lock) + parsed_count
         print(f"   ✅ Parsed {parsed_count} npm packages from package.json (skipped {skipped_count} already in lock file)")
