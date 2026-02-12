@@ -28,10 +28,12 @@ class DependencyGraph:
     """Build and query a dependency graph from CycloneDX SBOM."""
     
     def __init__(self, sbom_data: dict):
-        self.components_by_purl: Dict[str, dict] = {}
+        self.components_by_purl: Dict[str, List[dict]] = defaultdict(list)  # Changed to list for duplicate purls
         self.name_index: Dict[str, List[str]] = defaultdict(list)
-        self.parents: Dict[str, Set[str]] = defaultdict(set)
-        self.children: Dict[str, Set[str]] = defaultdict(set)
+        self.parents: Dict[str, Set[str]] = defaultdict(set)  # purl/bom-ref → parents
+        self.children: Dict[str, Set[str]] = defaultdict(set)  # purl/bom-ref → children
+        self.bom_ref_to_purl: Dict[str, str] = {}  # UUID → canonical purl
+        self.purl_to_bom_refs: Dict[str, List[str]] = defaultdict(list)  # purl → all bom-refs
         self._build_graph(sbom_data)
     
     def _get_package_name_from_purl(self, purl: str) -> Optional[str]:
@@ -70,66 +72,60 @@ class DependencyGraph:
         return None
     
     def _build_graph(self, sbom_data: dict):
-        """Build dependency graph from CycloneDX SBOM."""
+        """Build dependency graph from CycloneDX SBOM with support for duplicate purls."""
         # Index components by purl and bom-ref
-        # Keep full purls with versions to handle multiple versions of same package
+        # Handle cases where multiple components have the same purl (different locations in container)
         components = sbom_data.get('components', [])
-        bom_ref_to_purl = {}
         
         for component in components:
             purl = component.get('purl', '')
             bom_ref = component.get('bom-ref', '')
             
             if purl:
-                # Store with FULL purl (including version) to keep different versions distinct
-                self.components_by_purl[purl] = component
+                # Store ALL components with this purl (there may be duplicates at different paths)
+                self.components_by_purl[purl].append(component)
                 
                 # Build name index for reverse lookups
                 pkg_name = self._get_package_name_from_purl(purl)
-                if pkg_name:
+                if pkg_name and purl not in self.name_index[pkg_name.lower()]:
                     self.name_index[pkg_name.lower()].append(purl)
                 
                 if bom_ref:
-                    bom_ref_to_purl[bom_ref] = purl
+                    # Map bom-ref (UUID or purl) to canonical purl
+                    self.bom_ref_to_purl[bom_ref] = purl
+                    self.purl_to_bom_refs[purl].append(bom_ref)
         
-        # Build parent-child relationships
+        # Build parent-child relationships using bom-refs as keys
+        # This allows us to track relationships for duplicate purls separately
         dependencies = sbom_data.get('dependencies', [])
         
         for dep_entry in dependencies:
             parent_ref = dep_entry.get('ref', '')
             child_refs = dep_entry.get('dependsOn', [])
             
-            # Resolve parent - could be bom-ref or purl
-            parent_purl = bom_ref_to_purl.get(parent_ref)
-            if not parent_purl:
-                # Try direct purl match (some SBOMs use purl as ref)
-                if parent_ref in self.components_by_purl:
-                    parent_purl = parent_ref
-            
-            if not parent_purl:
+            if not parent_ref:
                 continue
             
             for child_ref in child_refs:
-                # Resolve child - could be bom-ref or purl
-                child_purl = bom_ref_to_purl.get(child_ref)
-                if not child_purl:
-                    if child_ref in self.components_by_purl:
-                        child_purl = child_ref
-                
-                if not child_purl:
+                if not child_ref:
                     continue
                 
-                self.parents[child_purl].add(parent_purl)
-                self.children[parent_purl].add(child_purl)
+                # Store relationships using bom-refs (which are unique)
+                # This preserves separate dependency chains for duplicate purls
+                self.parents[child_ref].add(parent_ref)
+                self.children[parent_ref].add(child_ref)
         
 
     
     def get_stats(self) -> dict:
         """Get dependency graph statistics for debugging."""
+        total_component_instances = sum(len(instances) for instances in self.components_by_purl.values())
         return {
-            'total_components': len(self.components_by_purl),
-            'packages_with_parents': len([p for p in self.components_by_purl if self.parents.get(p)]),
-            'packages_without_parents': len([p for p in self.components_by_purl if not self.parents.get(p)]),
+            'total_components': len(self.components_by_purl),  # Unique purls
+            'total_component_instances': total_component_instances,  # Including duplicates
+            'packages_with_parents': len([p for p in self.parents if self.parents.get(p)]),
+            'packages_without_parents': len([p for p in self.parents if not self.parents.get(p)]) + 
+                                       len([p for p in self.components_by_purl if p not in self.parents]),
             'total_dependency_edges': sum(len(parents) for parents in self.parents.values())
         }
     
@@ -175,40 +171,30 @@ class DependencyGraph:
         
         return matches
     
-    def get_root_paths(self, package_purl: str) -> List[List[str]]:
+    def get_root_paths(self, purl: str) -> List[List[str]]:
         """
-        Find all root dependencies that introduce this package.
-        Returns list of dependency paths from root to package.
+        Find all paths from root dependencies to the target purl.
+        Returns list of paths, where each path is [root, ..., target].
+        Handles duplicate purls by finding paths for ALL instances.
         """
-        paths = []
+        all_paths = []
         
-        def dfs(current: str, path: List[str]):
-            """DFS to find all paths to root dependencies."""
-            # Circular dependency protection - check before adding to path
-            if current in path:
-                return
-            
-            # Add current node to path for this branch
-            current_path = path + [current]
-            
-            parent_purls = self.parents.get(current, set())
-            
-            if not parent_purls:
-                # Root dependency found - reverse to show root → ... → target
-                paths.append(list(reversed(current_path)))
-                return
-            
-            # Recurse to parents with updated path
-            for parent in sorted(parent_purls):  # Sort for determinism
-                dfs(parent, current_path)
+        # Get all bom-refs for this purl (might be multiple instances)
+        bom_refs = self.purl_to_bom_refs.get(purl, [])
         
-        # Start DFS with empty path
-        dfs(package_purl, [])
+        # If purl is used as direct bom-ref (no UUID), include it
+        if not bom_refs and purl in self.parents:
+            bom_refs = [purl]
         
-        # Deduplicate and sort paths by length (prefer shorter paths)
+        # Find paths for each instance of this purl
+        for bom_ref in bom_refs:
+            instance_paths = self._get_root_paths_for_ref(bom_ref)
+            all_paths.extend(instance_paths)
+        
+        # Deduplicate and sort by length
         unique_paths = []
         seen = set()
-        for path in sorted(paths, key=len):
+        for path in sorted(all_paths, key=len):
             path_key = tuple(path)
             if path_key not in seen:
                 unique_paths.append(path)
@@ -216,9 +202,66 @@ class DependencyGraph:
         
         return unique_paths
     
-    def is_direct_dependency(self, package_purl: str) -> bool:
-        """Check if package is a direct (root) dependency."""
-        return len(self.parents.get(package_purl, set())) == 0
+    def _get_root_paths_for_ref(self, bom_ref: str) -> List[List[str]]:
+        """
+        Find all paths from root dependencies to the target bom-ref.
+        Uses bom-refs for path resolution to handle duplicate purls correctly.
+        """
+        paths = []
+        
+        def dfs(current_ref: str, path: List[str]):
+            # Check for circular dependency
+            if current_ref in path:
+                return
+            
+            # Add current node to path
+            current_path = path + [current_ref]
+            
+            parent_refs = self.parents.get(current_ref, set())
+            
+            if not parent_refs:
+                # Root dependency found - convert bom-refs to purls for display
+                purl_path = []
+                for ref in current_path:
+                    # Check if ref is already a purl or needs conversion
+                    if ref.startswith('pkg:'):
+                        purl_path.append(ref)
+                    else:
+                        # It's a UUID, convert to purl
+                        purl = self.bom_ref_to_purl.get(ref, ref)
+                        purl_path.append(purl)
+                
+                # Reverse to show root → ... → target
+                paths.append(list(reversed(purl_path)))
+                return
+            
+            # Recurse to parents
+            for parent_ref in sorted(parent_refs):  # Sort for determinism
+                dfs(parent_ref, current_path)
+        
+        # Start DFS with empty path
+        dfs(bom_ref, [])
+        
+        return paths
+    
+    def is_direct_dependency(self, purl: str) -> bool:
+        """
+        Check if package is a direct (root) dependency.
+        A purl is direct if ANY of its instances has no parents.
+        """
+        # Check all bom-refs for this purl
+        bom_refs = self.purl_to_bom_refs.get(purl, [])
+        
+        # If purl is used as direct bom-ref, check it too
+        if not bom_refs and purl in self.parents:
+            bom_refs = [purl]
+        
+        # Direct if any instance has no parents
+        for bom_ref in bom_refs:
+            if len(self.parents.get(bom_ref, set())) == 0:
+                return True
+        
+        return False
 
 
 class VulnerabilityEnricher:
@@ -375,7 +418,10 @@ class VulnerabilityEnricher:
         # Show dependency graph statistics first
         print(f"\n📊 Dependency Graph Statistics:")
         stats = self.dependency_graph.get_stats()
-        print(f"   Total components: {stats['total_components']}")
+        print(f"   Total unique purls: {stats['total_components']}")
+        print(f"   Total component instances: {stats['total_component_instances']}")
+        if stats['total_component_instances'] > stats['total_components']:
+            print(f"   ⚠️  Detected {stats['total_component_instances'] - stats['total_components']} duplicate purls (multiple instances)")
         print(f"   Packages with parents: {stats['packages_with_parents']}")
         print(f"   Packages without parents (direct deps): {stats['packages_without_parents']}")
         print(f"   Total dependency edges: {stats['total_dependency_edges']}")
@@ -533,14 +579,20 @@ class VulnerabilityEnricher:
             
             root_paths = analysis['root_paths']
             if root_paths:
-                # Show shortest path
-                shortest_path = min(root_paths, key=len)
-                formatted_path = self.format_dependency_path(shortest_path)
-                text_parts.append(f"   • Dependency chain:")
-                text_parts.append(f"     {formatted_path}")
+                # Show all paths (user wants to see all paths)
+                text_parts.append(f"   • Dependency chain{' (multiple paths)' if len(root_paths) > 1 else ''}:")
                 
-                if len(root_paths) > 1:
-                    text_parts.append(f"   • Additional paths: {len(root_paths) - 1} more")
+                # Sort by length (shortest first) and show up to 5 paths
+                max_paths_to_show = 5
+                for idx, path in enumerate(sorted(root_paths, key=len)[:max_paths_to_show]):
+                    formatted_path = self.format_dependency_path(path)
+                    if idx == 0:
+                        text_parts.append(f"     {formatted_path}")
+                    else:
+                        text_parts.append(f"     {formatted_path}")
+                
+                if len(root_paths) > max_paths_to_show:
+                    text_parts.append(f"     ... and {len(root_paths) - max_paths_to_show} more paths")
             else:
                 # Transitive but no paths found (shouldn't happen with correct graph)
                 text_parts.append(f"   • Dependency chain: Unable to trace to root")
