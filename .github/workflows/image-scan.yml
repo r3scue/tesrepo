@@ -160,9 +160,9 @@ jobs:
                  .locations[0].physicalLocation.region = {"startLine": 1, "startColumn": 1, "endLine": 1, "endColumn": 1}
                ] |
                .runs[0].automationDetails = {
-                 "id": ("container-security/ecr-scan/" + $repo + "/" + $tag),
+                 "id": ("container-security/ecr-scan/" + $repo),
                  "description": {
-                   "text": ("Container vulnerability scan for ECR image: " + $image)
+                   "text": ("Container vulnerability scan for ECR repository: " + $repo)
                  }
                }' trivy-results-raw.sarif > trivy-results-updated.sarif
             
