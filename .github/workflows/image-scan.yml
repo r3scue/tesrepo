@@ -255,6 +255,15 @@ jobs:
                        end)
                    end) as $severity |
                  
+                 # Map severity to SARIF level (required enum: none, note, warning, error)
+                 ($severity | 
+                   if . == "CRITICAL" then "error"
+                   elif . == "HIGH" then "error"
+                   elif . == "MEDIUM" then "warning"
+                   elif . == "LOW" then "note"
+                   else "warning"
+                   end) as $sarif_level |
+                 
                  # Extract container path
                  ($original_msg |
                    if contains("Container Path:") then
@@ -277,7 +286,7 @@ jobs:
                  
                  # Build clean message with better line breaks
                  $result |
-                 .level = ($severity | ascii_downcase) |
+                 .level = $sarif_level |
                  .message.text = (
                    "�️ **Container Vulnerability**\n\n" +
                    "\n" +
