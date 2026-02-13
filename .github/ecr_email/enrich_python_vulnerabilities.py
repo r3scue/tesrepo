@@ -601,7 +601,9 @@ class VulnerabilityEnricher:
         total_edges = sum(len(parents) for parents in self.dependency_graph.parents.values())
         
         lines = []
+        lines.append("")  # Blank line before section
         lines.append("🔗 **Dependency Analysis:**")
+        lines.append("")  # Blank line after header
         
         if analysis['status'] == 'unresolved':
             lines.append("- Direct dependency: ? (not found in SBOM)")
@@ -636,6 +638,8 @@ class VulnerabilityEnricher:
                 else:
                     lines.append("- Dependency chain: Unable to trace")
         
+        lines.append("")  # Blank line at end
+        lines.append("")  # Extra blank line for separation
         return '\n'.join(lines)
     
     def save_sarif(self) -> bool:
