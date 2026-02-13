@@ -293,7 +293,7 @@ jobs:
                    "**Tag:** " + $tag + "\n" +
                    "**Image:** " + $image + "  \n" +
                     "\n" +
-                    "📦 **Affected Package**\n\n" +
+                    "**Affected Package**\n\n" +
                    "- **Package:** " + $package_name + "\n" +
                    "- **Installed Version:** " + $installed_version + "\n" +
                    "- **Fixed Version:** " + (if $fixed_version != "" and $fixed_version != "null" and $fixed_version != "unknown" then $fixed_version else "Not available" end) + "\n" +
@@ -301,7 +301,7 @@ jobs:
                    "\n---\n\n" +
                    "🔥 **Severity:** " + $severity + "\n\n" +
                    "---\n\n" +
-                   "🔗 **Dependency Analysis:**\n\n" +
+                   "**Dependency Analysis:**\n\n" +
                    "- Direct dependency: ✓\n" +
                    "- Package: " + $package_name + "@" + $installed_version + "\n\n" +
                    "---\n\n" +
