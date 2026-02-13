@@ -287,10 +287,10 @@ jobs:
                    "**Image:** " + $image + "\n\n" +
                    "---\n\n" +
                    "📦 **Affected Package**\n\n" +
-                   "- **Package:** " + $package_name + "\n" +
-                   "- **Installed Version:** " + $installed_version + "\n" +
-                   "- **Fixed Version:** " + (if $fixed_version != "" and $fixed_version != "null" and $fixed_version != "unknown" then $fixed_version else "Not available" end) + "\n" +
-                   (if $container_path != "unknown" then "- **Container Path:** " + $container_path + "\n" else "" end) +
+                   "- Package: " + $package_name + "\n" +
+                   "- Installed Version: " + $installed_version + "\n" +
+                   "- Fixed Version: " + (if $fixed_version != "" and $fixed_version != "null" and $fixed_version != "unknown" then $fixed_version else "Not available" end) + "\n" +
+                   (if $container_path != "unknown" then "- Container Path: " + $container_path + "\n" else "" end) +
                    "\n---\n\n" +
                    "🔥 **Severity:** " + $severity + "\n\n" +
                    "---\n\n" +
