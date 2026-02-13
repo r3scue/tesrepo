@@ -288,8 +288,7 @@ jobs:
                  $result |
                  .level = $sarif_level |
                  .message.text = (
-                   "�️ **Container Vulnerability**\n\n" +
-                   "\n" +
+                   "🛡️ **Container Vulnerability**\n\n" +
                    "**Repository:** " + $repo + "\n" +
                    "**Tag:** " + $tag + "\n" +
                    "**Image:** " + $image + "\n\n" +
