@@ -554,13 +554,13 @@ class VulnerabilityEnricher:
             for line in lines:
                 line_stripped = line.strip()
                 
-                # Look for - Package: name (simplified format without bold)
-                if line_stripped.startswith('- Package:'):
-                    pkg_name = line_stripped.replace('- Package:', '').strip()
+                # Look for - **Package:** name
+                if line_stripped.startswith('- **Package:**'):
+                    pkg_name = line_stripped.replace('- **Package:**', '').strip()
                 
-                # Look for - Installed Version: version
-                if line_stripped.startswith('- Installed Version:'):
-                    pkg_version = line_stripped.replace('- Installed Version:', '').strip()
+                # Look for - **Installed Version:** version
+                if line_stripped.startswith('- **Installed Version:**'):
+                    pkg_version = line_stripped.replace('- **Installed Version:**', '').strip()
         
         # Fallback: parse old formats
         if not pkg_name or not pkg_version:
@@ -602,7 +602,6 @@ class VulnerabilityEnricher:
         
         lines = []
         lines.append("🔗 **Dependency Analysis:**")
-        lines.append("")  # Blank line after header
         
         if analysis['status'] == 'unresolved':
             lines.append("- Direct dependency: ? (not found in SBOM)")
