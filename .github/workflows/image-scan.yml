@@ -187,15 +187,19 @@ jobs:
                     else "LOW"
                     end)) as $severity |
                  
+                 # Determine ecosystem for tags
+                 (($rule.help.text // "") | get_ecosystem) as $ecosystem |
+                 
                  # Format: 🐳 <repo> — <package> — <CVE> (<Severity>)
                  $rule |
                  .shortDescription.text = "🐳 " + $repo + " — " + $pkg + " — " + $rule.id + " (" + ($severity | ascii_upcase) + ")" |
                  
-                 # Enhance rule properties with deterministic tags
-                 .properties = ($rule.properties // {}) | 
-                   .tags = (["container", "ecr", (($rule.help.text // "") | get_ecosystem), "vulnerability"] | sort | unique) |
-                   .["security-severity"] = ($severity | severity_to_score) |
-                   .precision = "high"
+                 # Enhance rule properties with deterministic tags (nested in .properties)
+                 .properties = (($rule.properties // {}) + {
+                   "tags": (["container", "ecr", $ecosystem, "vulnerability"] | sort | unique),
+                   "security-severity": ($severity | severity_to_score),
+                   "precision": "high"
+                 })
                ] |
                
                # Enhance results with structured markdown
