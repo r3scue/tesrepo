@@ -288,30 +288,28 @@ jobs:
                  $result |
                  .level = $sarif_level |
                  .message.text = (
-                      "## 🛡️ Container Vulnerability\n\n" +
-                      "**Repository:** " + $repo + "\n" +
-                      "**Tag:** " + $tag + "\n" +
-                      "**Image:** " + $image + "\n\n" +
-
-                      "### 📦 Affected Package\n" +
-                      "- **Package:** " + $package_name + "\n" +
-                      "- **Installed Version:** " + $installed_version + "\n" +
-                      "- **Fixed Version:** " + ... + "\n" +
-                      (if $container_path != "unknown" then "- **Container Path:** " + $container_path + "\n" else "" end) + "\n" +
-
-                      "### 🔥 Severity\n" +
-                      $severity + "\n\n" +
-
-                      "### 🔗 Dependency Analysis\n" +
-                      "- Direct dependency: ✓\n" +
-                      "- Package: " + $package_name + "@" + $installed_version + "\n\n" +
-
-                      "### 🛠 Recommended Remediation\n" +
-                      $remediation + "\n\n" +
-
-                      "### 📖 CVE Reference\n" +
-                      "[" + $result.ruleId + "](https://nvd.nist.gov/vuln/detail/" + $result.ruleId + ")\n"
-                    )|
+                   "🛡️ **Container Vulnerability**\n\n" +
+                   "**Repository:** " + $repo + "\n" +
+                   "**Tag:** " + $tag + "\n" +
+                   "**Image:** " + $image + "  \n" +
+                    "\n" +
+                    "📦 **Affected Package**\n\n" +
+                   "- **Package:** " + $package_name + "\n" +
+                   "- **Installed Version:** " + $installed_version + "\n" +
+                   "- **Fixed Version:** " + (if $fixed_version != "" and $fixed_version != "null" and $fixed_version != "unknown" then $fixed_version else "Not available" end) + "\n" +
+                   (if $container_path != "unknown" then "- **Container Path:** " + $container_path + "\n" else "" end) +
+                   "\n---\n\n" +
+                   "🔥 **Severity:** " + $severity + "\n\n" +
+                   "---\n\n" +
+                   "🔗 **Dependency Analysis:**\n\n" +
+                   "- Direct dependency: ✓\n" +
+                   "- Package: " + $package_name + "@" + $installed_version + "\n\n" +
+                   "---\n\n" +
+                   "🛠 **Recommended Remediation**\n\n" +
+                   $remediation + "\n\n" +
+                   "---\n\n" +
+                   "📖 **CVE Reference:** [" + $result.ruleId + "](https://nvd.nist.gov/vuln/detail/" + $result.ruleId + ")\n"
+                 ) |
                  .message.markdown = .message.text |
                  
                  # Remap location to workflow file so GitHub displays the alert
