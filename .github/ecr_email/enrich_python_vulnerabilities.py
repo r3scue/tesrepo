@@ -503,9 +503,8 @@ class VulnerabilityEnricher:
                     if len(parts) > 1:
                         # Find the next section (starts with emoji and **)
                         after_dep = parts[1]
-                        # Look for next section marker (emoji followed by **)
-                        import re
-                        next_section_match = re.search(r'\n\n---\n\n[🔥🛠📖]', after_dep)
+                        # Look for next section marker (🛠 or 📖)
+                        next_section_match = re.search(r'\n\n---\n\n🛠', after_dep)
                         
                         if next_section_match:
                             # Keep everything before and after, replace middle
@@ -596,7 +595,7 @@ class VulnerabilityEnricher:
         return (pkg_name, pkg_version)
     
     def _build_enrichment_text(self, package_name: str, version: str, analysis: dict) -> str:
-        """Build enrichment text matching the clean format."""
+        """Build enrichment text for SARIF message - maintains original logic, updates format."""
         # Check if we have any dependency information at all
         total_edges = sum(len(parents) for parents in self.dependency_graph.parents.values())
         
@@ -607,35 +606,42 @@ class VulnerabilityEnricher:
         if analysis['status'] == 'unresolved':
             lines.append("- Direct dependency: ? (not found in SBOM)")
             lines.append(f"- Package: {package_name}@{version}")
+            lines.append("  Note: Package not found in dependency graph")
         else:
-            version_note = ""
+            version_mismatch_note = ""
             if analysis['status'] == 'version_mismatch':
                 matched_version = self.dependency_graph._get_version_from_purl(analysis['matched_purl'])
-                version_note = f" (using v{matched_version} from SBOM)"
+                version_mismatch_note = f" (matched version {matched_version} in SBOM)"
             
             if analysis['is_direct']:
                 if total_edges == 0:
-                    lines.append(f"- Direct dependency: ✓ (no dependency graph){version_note}")
+                    lines.append(f"- Direct dependency: ✓ (no dependency relationships in SBOM){version_mismatch_note}")
                 else:
-                    lines.append(f"- Direct dependency: ✓{version_note}")
+                    lines.append(f"- Direct dependency: ✓{version_mismatch_note}")
                 lines.append(f"- Package: {package_name}@{version}")
             else:
-                lines.append(f"- Direct dependency: ✗ (transitive){version_note}")
+                lines.append(f"- Direct dependency: ✗ (transitive){version_mismatch_note}")
                 lines.append(f"- Vulnerable package: {package_name}@{version}")
                 
                 root_paths = analysis['root_paths']
                 if root_paths:
-                    if len(root_paths) > 1:
-                        lines.append(f"- Dependency chains ({len(root_paths)} paths):")
-                    else:
-                        lines.append("- Dependency chain:")
+                    # Show all paths (user wants to see all paths)
+                    lines.append(f"- Dependency chain{' (multiple paths)' if len(root_paths) > 1 else ''}:")
                     
-                    # Show all paths, sorted by length
+                    # Sort by length (shortest first) and show ALL paths
                     for path in sorted(root_paths, key=len):
                         formatted_path = self.format_dependency_path(path)
                         lines.append(f"  - {formatted_path}")
                 else:
-                    lines.append("- Dependency chain: Unable to trace")
+                    # Transitive but no paths found (shouldn't happen with correct graph)
+                    lines.append("- Dependency chain: Unable to trace to root")
+                    lines.append("  Note: Package has dependencies but path resolution failed")
+        
+        if analysis.get('has_circular'):
+            lines.append("- Circular dependency: ✓ (detected in graph)")
+        
+        if analysis['status'] == 'version_mismatch':
+            lines.append("- Version matched exactly: ✗ (using fallback)")
         
         return '\n'.join(lines)
     
