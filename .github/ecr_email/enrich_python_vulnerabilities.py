@@ -496,9 +496,9 @@ class VulnerabilityEnricher:
                 current_message = result['message']['text']
                 
                 # Find and replace the dependency analysis section
-                if '**Dependency Analysis:**' in current_message:
+                if '🔗 **Dependency Analysis:**' in current_message:
                     # Split at dependency analysis
-                    parts = current_message.split('**Dependency Analysis:**')
+                    parts = current_message.split('🔗 **Dependency Analysis:**')
                     
                     if len(parts) > 1:
                         # Find the next section (starts with emoji and **)
@@ -549,7 +549,7 @@ class VulnerabilityEnricher:
         pkg_version = None
         
         # Parse current format (📦 **Affected Package**)
-        if '**Affected Package**' in message:
+        if '📦 **Affected Package**' in message:
             lines = message.split('\n')
             for line in lines:
                 line_stripped = line.strip()
