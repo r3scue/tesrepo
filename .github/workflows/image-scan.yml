@@ -142,23 +142,187 @@ jobs:
                --arg tag "$LATEST_TAG" \
                --arg workflow ".github/workflows/image-scan.yml" \
                '
+               # Helper function to map severity to score
+               def severity_to_score:
+                 if . == "CRITICAL" then "9.0"
+                 elif . == "HIGH" then "7.5"
+                 elif . == "MEDIUM" then "5.0"
+                 elif . == "LOW" then "3.0"
+                 else "0.0"
+                 end;
+               
+               # Helper function to determine ecosystem from target
+               def get_ecosystem:
+                 if contains("python") then "python"
+                 elif contains("node") or contains("npm") then "nodejs"
+                 elif contains("os-pkgs") then "os-package"
+                 else "unknown"
+                 end;
+               
                # Remove originalUriBaseIds that can conflict with relative paths
                del(.runs[0].originalUriBaseIds) |
                .runs[0].tool.driver.name = "MontyCloud Container Scanner" |
-               .runs[0].tool.driver.fullName = "MontyCloud ECR Image Vulnerability Scanner (" + $repo + ")" |
-               .runs[0].tool.driver.rules = [.runs[0].tool.driver.rules[]? | 
-                 .shortDescription.text = "[" + $repo + "] " + .shortDescription.text |
-                 .properties.tags = ((.properties.tags // []) + ["container-vulnerability", "ecr-image", $repo])
+               .runs[0].tool.driver.fullName = "MontyCloud ECR Container Vulnerability Scanner" |
+               
+               # Build lookup map: ruleId -> severity (from results)
+               (.runs[0].results // [] | map({(.ruleId): .level}) | add) as $severity_map |
+               
+               # Enhance rules with context-rich titles and metadata
+               .runs[0].tool.driver.rules = [.runs[0].tool.driver.rules[]? |
+                 . as $rule |
+                 # Extract package name from help text or use first word after CVE
+                 ($rule.help.text // $rule.fullDescription.text // "" | 
+                   if contains("Package:") then 
+                     (split("Package:")[1] // "" | split("\n")[0] | gsub("^[^a-zA-Z0-9]+"; "") | split(" ")[0])
+                   else
+                     (split(" ")[0] // "unknown")
+                   end) as $pkg |
+                 
+                 # Get severity from rule properties or default
+                 ($rule.properties.security_severity // 
+                  $rule.properties."security-severity" // 
+                  (($severity_map[$rule.id] // "warning") | 
+                    if . == "error" then "HIGH"
+                    elif . == "warning" then "MEDIUM"
+                    else "LOW"
+                    end)) as $severity |
+                 
+                 # Format: 🐳 <repo> — <package> — <CVE> (<Severity>)
+                 $rule |
+                 .shortDescription.text = "🐳 " + $repo + " — " + $pkg + " — " + $rule.id + " (" + ($severity | ascii_upcase) + ")" |
+                 
+                 # Enhance rule properties with deterministic tags
+                 .properties = ($rule.properties // {}) | 
+                   .tags = (["container", "ecr", (($rule.help.text // "") | get_ecosystem), "vulnerability"] | sort | unique) |
+                   .["security-severity"] = ($severity | severity_to_score) |
+                   .precision = "high"
                ] |
-               .runs[0].results = [.runs[0].results[]? | 
-                 # Store original container path in message
-                 .message.text = "Image: " + $image + "\nRepository: " + $repo + "\nTag: " + $tag + "\nContainer Path: " + (.locations[0].physicalLocation.artifactLocation.uri // "unknown") + "\n\n" + .message.text |
+               
+               # Enhance results with structured markdown
+               .runs[0].results = [.runs[0].results[]? |
+                 . as $result |
+                 
+                 # Extract metadata from original message
+                 ($result.message.text // "") as $original_msg |
+                 
+                 # Extract package info from message
+                 ($original_msg | 
+                   if contains("Package:") then
+                     (split("Package:")[1] | split("\n")[0] | gsub("^[^a-zA-Z0-9]+"; "") | split(" ")[0])
+                   elif contains("PkgName:") then
+                     (split("PkgName:")[1] | split("\n")[0] | gsub("^[^a-zA-Z0-9]+"; "") | split(" ")[0])
+                   else "unknown"
+                   end) as $package_name |
+                 
+                 # Extract installed version
+                 ($original_msg | 
+                   if contains("Installed Version:") then
+                     (split("Installed Version:")[1] | split("\n")[0] | gsub("^[^a-zA-Z0-9.]+"; "") | split(" ")[0])
+                   elif contains("InstalledVersion:") then
+                     (split("InstalledVersion:")[1] | split("\n")[0] | gsub("^[^a-zA-Z0-9.]+"; "") | split(" ")[0])
+                   else "unknown"
+                   end) as $installed_version |
+                 
+                 # Extract fixed version
+                 ($original_msg | 
+                   if contains("Fixed Version:") then
+                     (split("Fixed Version:")[1] | split("\n")[0] | gsub("^[^a-zA-Z0-9.]+"; "") | split(" ")[0])
+                   elif contains("FixedVersion:") then
+                     (split("FixedVersion:")[1] | split("\n")[0] | gsub("^[^a-zA-Z0-9.]+"; "") | split(" ")[0])
+                   else ""
+                   end) as $fixed_version |
+                 
+                 # Extract severity
+                 ($original_msg | 
+                   if contains("Severity:") then
+                     (split("Severity:")[1] | split("\n")[0] | gsub("^[^A-Z]+"; "") | split(" ")[0])
+                   else
+                     ($result.level // "warning" | 
+                       if . == "error" then "HIGH"
+                       elif . == "warning" then "MEDIUM"  
+                       else "LOW"
+                       end)
+                   end) as $severity |
+                 
+                 # Extract container path
+                 ($original_msg |
+                   if contains("Container Path:") then
+                     (split("Container Path:")[1] | split("\n")[0] | gsub("^[^a-zA-Z0-9/]+"; ""))
+                   else
+                     ($result.locations[0].physicalLocation.artifactLocation.uri // "unknown")
+                   end) as $container_path |
+                 
+                 # Detect if OS package
+                 ($original_msg | contains("os-pkgs") or contains("Os Package")) as $is_os_pkg |
+                 
+                 # Build remediation text
+                 (if $fixed_version != "" and $fixed_version != "null" and $fixed_version != "unknown" then
+                    "Upgrade `" + $package_name + "` to version **" + $fixed_version + "** or later."
+                  elif $is_os_pkg then
+                    "Update the base image or perform a system package upgrade."
+                  else
+                    "No patched version currently available. Monitor upstream advisories."
+                  end) as $remediation |
+                 
+                 # Extract dependency analysis (preserve existing enrichment)
+                 ($original_msg |
+                   if contains("📦 Dependency Analysis:") then
+                     (split("📦 Dependency Analysis:")[1] | 
+                      split("─────────────────────────────────")[0] // "")
+                   else
+                     ""
+                   end) as $dep_analysis |
+                 
+                 ($dep_analysis |
+                   if contains("Direct dependency: ✓") then "Yes"
+                   elif contains("Direct dependency: ✗") then "No (transitive)"
+                   else "Unknown"
+                   end) as $is_direct |
+                 
+                 ($dep_analysis |
+                   if contains("Dependency chain:") then
+                     (split("Dependency chain:")[1] | split("\n")[0] | gsub("^[^a-zA-Z0-9]+"; ""))
+                   else
+                     $package_name
+                   end) as $dep_chain |
+                 
+                 # Build structured markdown message
+                 $result |
+                 .message.text = (
+                   "### 🐳 Container Vulnerability\n\n" +
+                   "**Repository:** `" + $repo + "`  \n" +
+                   "**Tag:** `" + $tag + "`  \n" +
+                   "**Image:** `" + $image + "`  \n\n" +
+                   "---\n\n" +
+                   "### 📦 Affected Package\n" +
+                   "- **Package:** `" + $package_name + "`\n" +
+                   "- **Installed Version:** `" + $installed_version + "`\n" +
+                   "- **Fixed Version:** " + (if $fixed_version != "" and $fixed_version != "null" and $fixed_version != "unknown" then "`" + $fixed_version + "`" else "*Not available*" end) + "\n" +
+                   (if $container_path != "unknown" then "- **Container Path:** `" + $container_path + "`\n" else "" end) +
+                   "\n---\n\n" +
+                   "### 🔥 Severity\n" +
+                   "**" + $severity + "**\n\n" +
+                   "---\n\n" +
+                   "### 🔗 Dependency Analysis\n" +
+                   "- **Direct Dependency:** " + $is_direct + "\n" +
+                   "- **Dependency Chain:**\n  ```\n  " + $dep_chain + "\n  ```\n\n" +
+                   "---\n\n" +
+                   "### 🛠 Recommended Remediation\n" +
+                   $remediation + "\n\n" +
+                   "---\n\n" +
+                   "### 📖 CVE Reference\n" +
+                   "[" + $result.ruleId + "](https://nvd.nist.gov/vuln/detail/" + $result.ruleId + ")\n"
+                 ) |
+                 
                  # Remap location to workflow file so GitHub displays the alert
                  .locations[0].physicalLocation.artifactLocation.uri = $workflow |
+                 
                  # Remove uriBaseId - let GitHub treat path as relative to repo root
                  del(.locations[0].physicalLocation.artifactLocation.uriBaseId) |
                  .locations[0].physicalLocation.region = {"startLine": 1, "startColumn": 1, "endLine": 1, "endColumn": 1}
                ] |
+               
+               # Set stable automationDetails (no tag!)
                .runs[0].automationDetails = {
                  "id": ("container-security/ecr-scan/" + $repo),
                  "description": {

@@ -492,9 +492,32 @@ class VulnerabilityEnricher:
                 # Build enrichment text
                 enrichment = self._build_enrichment_text(pkg_name, pkg_version, analysis)
                 
-                # Append to message
+                # Replace dependency analysis section in structured markdown  
                 current_message = result['message']['text']
-                result['message']['text'] = f"{current_message}\n\n{enrichment}"
+                
+                # Find and replace the dependency analysis section
+                if '### 🔗 Dependency Analysis' in current_message:
+                    # Split message at dependency analysis section
+                    parts = current_message.split('### 🔗 Dependency Analysis')
+                    
+                    # Find the end of the dependency analysis section (next ### or end)
+                    if len(parts) > 1:
+                        after_dep = parts[1]
+                        # Find next section marker
+                        next_section_idx = after_dep.find('\n\n---\n\n###')
+                        
+                        if next_section_idx != -1:
+                            # Replace section and keep rest
+                            result['message']['text'] = parts[0] + enrichment + after_dep[next_section_idx:]
+                        else:
+                            # Dependency section is last, just replace it
+                            result['message']['text'] = parts[0] + enrichment
+                    else:
+                        # Shouldn't happen, but fallback to append
+                        result['message']['text'] = f"{current_message}\n\n{enrichment}"
+                else:
+                    # Old format or manual scan - append enrichment
+                    result['message']['text'] = f"{current_message}\n\n{enrichment}"
                 
                 enriched_count += 1
                 if analysis['status'] == 'unresolved':
@@ -516,100 +539,101 @@ class VulnerabilityEnricher:
         Returns (package_name, version) or (None, None) if not found.
         """
         message = result.get('message', {}).get('text', '')
-        lines = message.split('\n')
         
         pkg_name = None
         pkg_version = None
         
-        # Parse Trivy message format
-        for line in lines:
-            line_stripped = line.strip()
-            
-            # Look for Package: or PkgName:
-            if line_stripped.startswith('Package:'):
-                pkg_name = line_stripped.split(':', 1)[1].strip()
-            elif line_stripped.startswith('PkgName:'):
-                pkg_name = line_stripped.split(':', 1)[1].strip()
-            
-            # Look for Installed Version: or InstalledVersion:
-            if line_stripped.startswith('Installed Version:'):
-                pkg_version = line_stripped.split(':', 1)[1].strip()
-            elif line_stripped.startswith('InstalledVersion:'):
-                pkg_version = line_stripped.split(':', 1)[1].strip()
-            elif line_stripped.startswith('Version:') and not pkg_version:
-                pkg_version = line_stripped.split(':', 1)[1].strip()
-        
-        # Fallback: parse purl if present
-        if not pkg_name or not pkg_version:
+        # Parse structured markdown format (new format)
+        if '### 📦 Affected Package' in message:
+            lines = message.split('\n')
             for line in lines:
-                if 'pkg:' in line:
-                    match = re.search(r'pkg:(pypi|npm)/([^@\s]+)@([^\s]+)', line)
-                    if match:
-                        if not pkg_name:
-                            pkg_name = match.group(2)
-                        if not pkg_version:
-                            pkg_version = match.group(3)
+                line_stripped = line.strip()
+                
+                # Look for **Package:** `name`
+                if line_stripped.startswith('- **Package:**'):
+                    parts = line_stripped.split('`')
+                    if len(parts) >= 2:
+                        pkg_name = parts[1]
+                
+                # Look for **Installed Version:** `version`
+                if line_stripped.startswith('- **Installed Version:**'):
+                    parts = line_stripped.split('`')
+                    if len(parts) >= 2:
+                        pkg_version = parts[1]
+        
+        # Fallback: parse old format
+        if not pkg_name or not pkg_version:
+            lines = message.split('\n')
+            for line in lines:
+                line_stripped = line.strip()
+                
+                # Look for Package: or PkgName:
+                if line_stripped.startswith('Package:'):
+                    pkg_name = line_stripped.split(':', 1)[1].strip()
+                elif line_stripped.startswith('PkgName:'):
+                    pkg_name = line_stripped.split(':', 1)[1].strip()
+                
+                # Look for Installed Version: or InstalledVersion:
+                if line_stripped.startswith('Installed Version:'):
+                    pkg_version = line_stripped.split(':', 1)[1].strip()
+                elif line_stripped.startswith('InstalledVersion:'):
+                    pkg_version = line_stripped.split(':', 1)[1].strip()
+                elif line_stripped.startswith('Version:') and not pkg_version:
+                    pkg_version = line_stripped.split(':', 1)[1].strip()
+            
+            # Fallback: parse purl if present
+            if not pkg_name or not pkg_version:
+                for line in lines:
+                    if 'pkg:' in line:
+                        match = re.search(r'pkg:(pypi|npm)/([^@\s]+)@([^\s]+)', line)
+                        if match:
+                            if not pkg_name:
+                                pkg_name = match.group(2)
+                            if not pkg_version:
+                                pkg_version = match.group(3)
         
         return (pkg_name, pkg_version)
     
     def _build_enrichment_text(self, package_name: str, version: str, analysis: dict) -> str:
-        """Build enrichment text for SARIF message."""
-        if analysis['status'] == 'unresolved':
-            return (
-                "─────────────────────────────────\n"
-                "📦 Dependency Analysis:\n"
-                f"   Package: {package_name}\n"
-                f"   Version: {version}\n"
-                "   Status: Could not resolve dependency chain\n"
-                "   Note: Package not found in SBOM"
-            )
-        
-        text_parts = [
-            "─────────────────────────────────",
-            "📦 Dependency Analysis:"
-        ]
-        
+        """Build enrichment text for structured markdown SARIF message."""
         # Check if we have any dependency information at all
         total_edges = sum(len(parents) for parents in self.dependency_graph.parents.values())
         
-        version_mismatch_note = ""
-        if analysis['status'] == 'version_mismatch':
-            matched_version = self.dependency_graph._get_version_from_purl(analysis['matched_purl'])
-            version_mismatch_note = f" (matched version {matched_version} in SBOM)"
-        
-        if analysis['is_direct']:
-            if total_edges == 0:
-                text_parts.append(f"   • Direct dependency: ✓ (no dependency relationships in SBOM)")
-                text_parts.append(f"   • Package: {package_name}@{version}")
-            else:
-                text_parts.append(f"   • Direct dependency: ✓{version_mismatch_note}")
-                text_parts.append(f"   • Package: {package_name}@{version}")
+        if analysis['status'] == 'unresolved':
+            is_direct = "Unknown (not found in SBOM)"
+            dep_chain = f"{package_name} (package not found in dependency graph)"
         else:
-            text_parts.append(f"   • Direct dependency: ✗ (transitive){version_mismatch_note}")
-            text_parts.append(f"   • Vulnerable package: {package_name}@{version}")
+            version_mismatch_note = ""
+            if analysis['status'] == 'version_mismatch':
+                matched_version = self.dependency_graph._get_version_from_purl(analysis['matched_purl'])
+                version_mismatch_note = f" (using version {matched_version} from SBOM)"
             
-            root_paths = analysis['root_paths']
-            if root_paths:
-                # Show all paths (user wants to see all paths)
-                text_parts.append(f"   • Dependency chain{' (multiple paths)' if len(root_paths) > 1 else ''}:")
-                
-                # Sort by length (shortest first) and show ALL paths
-                for idx, path in enumerate(sorted(root_paths, key=len)):
-                    formatted_path = self.format_dependency_path(path)
-                    text_parts.append(f"     {formatted_path}")
-
+            if analysis['is_direct']:
+                if total_edges == 0:
+                    is_direct = f"Yes (no dependency relationships in SBOM){version_mismatch_note}"
+                else:
+                    is_direct = f"Yes{version_mismatch_note}"
+                dep_chain = package_name
             else:
-                # Transitive but no paths found (shouldn't happen with correct graph)
-                text_parts.append(f"   • Dependency chain: Unable to trace to root")
-                text_parts.append(f"   • Note: Package has dependencies but path resolution failed")
+                is_direct = f"No (transitive){version_mismatch_note}"
+                
+                root_paths = analysis['root_paths']
+                if root_paths:
+                    # Format all paths
+                    formatted_paths = []
+                    for path in sorted(root_paths, key=len):  # Sort by length, shortest first
+                        formatted_paths.append(self.format_dependency_path(path))
+                    
+                    dep_chain = "\\n  ".join(formatted_paths)
+                else:
+                    dep_chain = f"{package_name} (unable to trace to root)"
         
-        if analysis['has_circular']:
-            text_parts.append(f"   • Circular dependency: ✓ (detected in graph)")
-        
-        if analysis['status'] == 'version_mismatch':
-            text_parts.append(f"   • Version matched exactly: ✗ (using fallback)")
-        
-        return '\n'.join(text_parts)
+        # Return markdown formatted text for dependency analysis section
+        return (
+            "### 🔗 Dependency Analysis\\n"
+            f"- **Direct Dependency:** {is_direct}\\n"
+            f"- **Dependency Chain:**\\n  ```\\n  {dep_chain}\\n  ```"
+        )
     
     def save_sarif(self) -> bool:
         """Save enriched SARIF file."""
