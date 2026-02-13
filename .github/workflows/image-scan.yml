@@ -164,8 +164,21 @@ jobs:
                .runs[0].tool.driver.name = "MontyCloud Container Scanner" |
                .runs[0].tool.driver.fullName = "MontyCloud ECR Container Vulnerability Scanner" |
                
-               # Build lookup map: ruleId -> severity (from results)
-               (.runs[0].results // [] | map({(.ruleId): .level}) | add) as $severity_map |
+               # Build lookup map: ruleId -> actual severity text (CRITICAL/HIGH/MEDIUM/LOW)
+               (.runs[0].results // [] | map({
+                 (.ruleId): (
+                   .message.text // "" | 
+                   if contains("Severity:") then
+                     (split("Severity:")[1] | split("\n")[0] | gsub("^[^A-Z]+"; "") | split(" ")[0])
+                   else
+                     (.level // "warning" | 
+                       if . == "error" then "HIGH"
+                       elif . == "warning" then "MEDIUM"  
+                       else "LOW"
+                       end)
+                   end
+                 )
+               }) | add) as $severity_map |
                
                # Enhance rules with context-rich titles and metadata
                .runs[0].tool.driver.rules = [.runs[0].tool.driver.rules[]? |
@@ -178,14 +191,8 @@ jobs:
                      (split(" ")[0] // "unknown")
                    end) as $pkg |
                  
-                 # Get severity from rule properties or default
-                 ($rule.properties.security_severity // 
-                  $rule.properties."security-severity" // 
-                  (($severity_map[$rule.id] // "warning") | 
-                    if . == "error" then "HIGH"
-                    elif . == "warning" then "MEDIUM"
-                    else "LOW"
-                    end)) as $severity |
+                 # Get severity from map (already extracted as CRITICAL/HIGH/MEDIUM/LOW)
+                 ($severity_map[$rule.id] // "MEDIUM") as $severity |
                  
                  # Determine ecosystem for tags
                  (($rule.help.text // "") | get_ecosystem) as $ecosystem |
@@ -248,15 +255,6 @@ jobs:
                        end)
                    end) as $severity |
                  
-                 # Map severity to SARIF level (for the badge on the right)
-                 ($severity | 
-                   if . == "CRITICAL" then "error"
-                   elif . == "HIGH" then "error"
-                   elif . == "MEDIUM" then "warning"
-                   elif . == "LOW" then "note"
-                   else "warning"
-                   end) as $sarif_level |
-                 
                  # Extract container path
                  ($original_msg |
                    if contains("Container Path:") then
@@ -279,7 +277,7 @@ jobs:
                  
                  # Build clean message with better line breaks
                  $result |
-                 .level = $sarif_level |
+                 .level = ($severity | ascii_downcase) |
                  .message.text = (
                    "�️ **Container Vulnerability**\n\n" +
                    "\n" +
