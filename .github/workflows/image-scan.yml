@@ -6,6 +6,16 @@ on:
       ecr_repos:
         description: "Comma-separated list of ECR repositories to scan"
         required: true
+      severity_filter:
+        description: "Severity levels to include in Code Scanning (CRITICAL, HIGH, MEDIUM, LOW)"
+        required: false
+        default: "CRITICAL,HIGH,MEDIUM"
+        type: choice
+        options:
+          - "CRITICAL"
+          - "CRITICAL,HIGH"
+          - "CRITICAL,HIGH,MEDIUM"
+          - "CRITICAL,HIGH,MEDIUM,LOW"
 
 permissions:
   id-token: write           # Required for OIDC
@@ -367,6 +377,107 @@ jobs:
             echo "✅ Enhanced SARIF report generated for $IMAGE_URI"
           done
 
+      # ============================================================================
+      # SEVERITY FILTERING FOR CODE SCANNING
+      # ============================================================================
+      # This step filters the SARIF file to only include vulnerabilities matching
+      # the selected severity levels before uploading to GitHub Code Scanning.
+      # 
+      # Why filter?
+      # - Reduce noise in Security tab by focusing on critical issues
+      # - Meet compliance requirements (e.g., only track HIGH and above)
+      # - Improve signal-to-noise ratio for security teams
+      # 
+      # How to adjust:
+      # 1. When running workflow, select severity filter from dropdown
+      # 2. Or modify the default in workflow inputs above (line 11)
+      # 3. Options: CRITICAL | CRITICAL,HIGH | CRITICAL,HIGH,MEDIUM | CRITICAL,HIGH,MEDIUM,LOW
+      # 
+      # Note: This only affects GitHub Code Scanning display.
+      # All severities are still:
+      # - Included in trivy-report.json (full report)
+      # - Uploaded as artifacts for review
+      # - Counted for Jira integration
+      # - Available in CSV export
+      # ============================================================================
+      
+      - name: Filter SARIF by Severity
+        run: |
+          # Get severity filter from workflow input (default: CRITICAL,HIGH,MEDIUM)
+          SEVERITY_FILTER="${{ github.event.inputs.severity_filter || 'CRITICAL,HIGH,MEDIUM' }}"
+          
+          echo "🔍 Filtering SARIF for Code Scanning upload..."
+          echo "   Selected severities: $SEVERITY_FILTER"
+          
+          # Convert comma-separated list to jq array format
+          # Example: "CRITICAL,HIGH" -> ["CRITICAL","HIGH"]
+          SEVERITY_ARRAY=$(echo "$SEVERITY_FILTER" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$"; ""))')
+          
+          echo "   Severity filter array: $SEVERITY_ARRAY"
+          
+          # Create filtered SARIF by keeping only results matching selected severities
+          jq --argjson severities "$SEVERITY_ARRAY" '
+            # Helper function to extract severity from message
+            def get_severity:
+              .message.text // "" | 
+              if contains("**Severity:** ") then
+                (split("**Severity:** ")[1] | split("\n")[0] | gsub("^[^A-Z]+"; "") | split(" ")[0])
+              else
+                "UNKNOWN"
+              end;
+            
+            # Filter results based on severity
+            .runs[0].results = [
+              .runs[0].results[]? | 
+              select(get_severity as $sev | $severities | index($sev))
+            ] |
+            
+            # Filter rules to only include those referenced by results
+            (.runs[0].results | map(.ruleId) | unique) as $used_rules |
+            .runs[0].tool.driver.rules = [
+              .runs[0].tool.driver.rules[]? | 
+              select(.id as $id | $used_rules | index($id))
+            ] |
+            
+            # Add metadata about filtering
+            .runs[0].properties = ((.runs[0].properties // {}) + {
+              "filtered_severities": $severities,
+              "filtering_applied": true
+            })
+          ' trivy-results-updated.sarif > trivy-results-filtered.sarif
+          
+          # Show statistics
+          ORIGINAL_COUNT=$(jq '.runs[0].results | length' trivy-results-updated.sarif)
+          FILTERED_COUNT=$(jq '.runs[0].results | length' trivy-results-filtered.sarif)
+          REMOVED_COUNT=$((ORIGINAL_COUNT - FILTERED_COUNT))
+          
+          echo "📊 Filtering Results:"
+          echo "   Original vulnerabilities: $ORIGINAL_COUNT"
+          echo "   After filtering: $FILTERED_COUNT"
+          echo "   Removed (lower severity): $REMOVED_COUNT"
+          
+          # Validate filtered SARIF
+          if jq empty trivy-results-filtered.sarif 2>/dev/null; then
+            echo "✅ Filtered SARIF is valid"
+          else
+            echo "❌ Filtered SARIF is invalid! Using original."
+            cp trivy-results-updated.sarif trivy-results-filtered.sarif
+          fi
+          
+          # Show breakdown by severity in filtered results
+          echo ""
+          echo "📋 Filtered SARIF Severity Breakdown:"
+          for LEVEL in CRITICAL HIGH MEDIUM LOW; do
+            COUNT=$(jq --arg level "$LEVEL" '
+              [.runs[0].results[]? | 
+               select(.message.text // "" | contains("**Severity:** " + $level))] | 
+               length
+            ' trivy-results-filtered.sarif)
+            if [ "$COUNT" -gt 0 ]; then
+              echo "   $LEVEL: $COUNT"
+            fi
+          done
+
 
       # - name: Scan Image with Trivy and Save Report
       #   run: |
@@ -392,8 +503,14 @@ jobs:
       - name: Upload SARIF for debugging
         uses: actions/upload-artifact@v4
         with:
-          name: trivy-sarif
+          name: trivy-sarif-full
           path: trivy-results-updated.sarif
+      
+      - name: Upload Filtered SARIF for debugging
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-sarif-filtered
+          path: trivy-results-filtered.sarif
 
       - name: Upload Enhanced SBOM for analysis
         uses: actions/upload-artifact@v4
@@ -462,7 +579,9 @@ jobs:
         id: upload-sarif
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: trivy-results-updated.sarif
+          # Upload filtered SARIF (only selected severities)
+          # Full SARIF is available as artifact and in trivy-report.json
+          sarif_file: trivy-results-filtered.sarif
           # Category helps distinguish container scans from other code scanning results
           category: "container-security/ecr-image-scan"
           # NOTE: Run this workflow from your default branch (dev) to see alerts in Security tab
