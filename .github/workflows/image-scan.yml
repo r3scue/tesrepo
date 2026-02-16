@@ -541,6 +541,7 @@ jobs:
           echo "   github.base_ref = ${{ github.base_ref }}"
 
       - name: Check for Critical or High Vulnerabilities
+        id: vulnerability-count
         run: |
           echo "### 🐳 ECR Container Vulnerability Scan Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -554,6 +555,15 @@ jobs:
           HIGH_COUNT=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity == "HIGH")] | length' trivy-report.json)
           MEDIUM_COUNT=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity == "MEDIUM")] | length' trivy-report.json)
           LOW_COUNT=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity == "LOW")] | length' trivy-report.json)
+          
+          # Export for Jira integration
+          echo "CRITICAL_COUNT=$CRITICAL_COUNT" >> $GITHUB_ENV
+          echo "HIGH_COUNT=$HIGH_COUNT" >> $GITHUB_ENV
+          echo "MEDIUM_COUNT=$MEDIUM_COUNT" >> $GITHUB_ENV
+          echo "LOW_COUNT=$LOW_COUNT" >> $GITHUB_ENV
+          
+          # Set output to indicate data is ready for Jira
+          echo "data-ready=true" >> $GITHUB_OUTPUT
           
           echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
@@ -571,3 +581,69 @@ jobs:
           else
             echo "✅ No Critical or High container vulnerabilities found." >> $GITHUB_STEP_SUMMARY
           fi
+
+      - name: Install Python Dependencies for Jira Integration
+        if: steps.vulnerability-count.outcome == 'success' && steps.vulnerability-count.outputs.data-ready == 'true'
+        run: |
+          echo "📦 Installing Python dependencies for Jira integration..."
+          pip install -r .github/ecr_email/requirements.txt
+
+      - name: Invoke Jira Lifecycle Automation
+        if: steps.vulnerability-count.outcome == 'success' && steps.vulnerability-count.outputs.data-ready == 'true'
+        continue-on-error: true
+        env:
+          JIRA_URL: ${{ secrets.JIRA_URL }}
+          JIRA_USERNAME: ${{ secrets.JIRA_USERNAME }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_PROJECT: ${{ secrets.JIRA_PROJECT }}
+          JIRA_ISSUE_TYPE: ${{ secrets.JIRA_ISSUE_TYPE || 'Task' }}
+          JIRA_EPIC_KEY: ${{ secrets.JIRA_EPIC_KEY }}
+          JIRA_FAIL_ON_ERROR: ${{ secrets.JIRA_FAIL_ON_ERROR || 'false' }}
+          JIRA_AWS_SECRET_NAME: ${{ secrets.JIRA_AWS_SECRET_NAME }}
+        run: |
+          echo "🎯 Starting Jira Lifecycle Automation..."
+          
+          # Extract repository name and tag from IMAGE_URI
+          ECR_REPOS="${{ github.event.inputs.ecr_repos }}"
+          IFS=',' read -r -a REPO_ARRAY <<< "$ECR_REPOS"
+          
+          for REPO in "${REPO_ARRAY[@]}"; do
+            echo "📊 Processing Jira automation for repository: $REPO"
+            
+            # Get image tag
+            IMAGE_JSON=$(aws ecr describe-images --repository-name "$REPO" --output json)
+            LATEST_TAG=$(echo "$IMAGE_JSON" | jq -r '
+              .imageDetails
+              | map(select(.imageTags | type == "array" and length > 0))
+              | sort_by(.imagePushedAt)
+              | reverse
+              | .[0].imageTags[0]')
+            
+            # Build complete image identifier
+            IMAGE_NAME="${REPO}:${LATEST_TAG}"
+            
+            # Generate scan timestamp (ISO 8601 format)
+            SCAN_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            
+            # Build GitHub Security filtered link
+            # Filter by tool name and severity
+            GITHUB_SECURITY_LINK="https://github.com/${{ github.repository }}/security/code-scanning?query=tool%3A%22MontyCloud+Container+Scanner%22+is%3Aopen"
+            
+            # Invoke Jira orchestration script
+            python3 .github/ecr_email/jira_orchestration.py \
+              "$IMAGE_NAME" \
+              "$SCAN_TIME" \
+              "${CRITICAL_COUNT:-0}" \
+              "${HIGH_COUNT:-0}" \
+              "${MEDIUM_COUNT:-0}" \
+              "${LOW_COUNT:-0}" \
+              "$GITHUB_SECURITY_LINK"
+            
+            if [ $? -eq 0 ]; then
+              echo "✅ Jira automation completed successfully for $IMAGE_NAME"
+            else
+              echo "⚠️ Jira automation encountered an error for $IMAGE_NAME (continuing workflow)"
+            fi
+          done
+          
+          echo "🎯 Jira Lifecycle Automation finished"
