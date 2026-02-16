@@ -285,8 +285,11 @@ jobs:
                  # Detect if OS package
                  ($original_msg | contains("os-pkgs") or contains("Os Package")) as $is_os_pkg |
                  
+                 # Check if fixed version is valid (not empty, null, unknown, or placeholder like ****)
+                 ($fixed_version | length > 0 and . != "null" and . != "unknown" and (test("^[*]+$") | not) and (test("[0-9]") or test("[a-zA-Z]"))) as $has_valid_fix |
+                 
                  # Build remediation text
-                 (if $fixed_version != "" and $fixed_version != "null" and $fixed_version != "unknown" then
+                 (if $has_valid_fix then
                     "Upgrade `" + $package_name + "` to version **" + $fixed_version + "** or later."
                   elif $is_os_pkg then
                     "Update the base image or perform a system package upgrade."
@@ -305,7 +308,7 @@ jobs:
                    "📦 **Affected Package**\n\n" +
                    "- **Package:** " + $package_name + "\n" +
                    "- **Installed Version:** " + $installed_version + "\n" +
-                   "- **Fixed Version:** " + (if $fixed_version != "" and $fixed_version != "null" and $fixed_version != "unknown" then $fixed_version else "Not available" end) + "\n" +
+                   "- **Fixed Version:** " + (if $has_valid_fix then $fixed_version else "Not available" end) + "\n" +
                    (if $container_path != "unknown" then "- **Container Path:** " + $container_path + "\n" else "" end) +
                    "\n---\n\n" +
                    "🔥 **Severity:** " + $severity + "\n\n" +
