@@ -161,14 +161,6 @@ jobs:
                  else "0.0"
                  end;
                
-               # Helper function to determine ecosystem from target
-               def get_ecosystem:
-                 if contains("python") then "python"
-                 elif contains("node") or contains("npm") then "nodejs"
-                 elif contains("os-pkgs") then "os-package"
-                 else "unknown"
-                 end;
-               
                # Remove originalUriBaseIds that can conflict with relative paths
                del(.runs[0].originalUriBaseIds) |
                .runs[0].tool.driver.name = "MontyCloud Container Scanner" |
@@ -204,16 +196,13 @@ jobs:
                  # Get severity from map (already extracted as CRITICAL/HIGH/MEDIUM/LOW)
                  ($severity_map[$rule.id] // "MEDIUM") as $severity |
                  
-                 # Determine ecosystem for tags
-                 (($rule.help.text // "") | get_ecosystem) as $ecosystem |
-                 
-                 # Format: �️ <repo> — <package> — <CVE> (<Severity>)
+                 # Format: 🛡️ <repo> — <package> — <CVE> (<Severity>)
                  $rule |
                  .shortDescription.text = "🛡️ " + $repo + " — " + $pkg + " — " + $rule.id + " (" + $severity + ")" |
                  
-                 # Enhance rule properties with deterministic tags (nested in .properties)
+                 # Enhance rule properties with security severity and precision
+                 # Note: ecosystem tags will be added later when we have package context
                  .properties = (($rule.properties // {}) + {
-                   "tags": (["container", "ecr", $ecosystem, "vulnerability"] | sort | unique),
                    "security-severity": ($severity | severity_to_score),
                    "precision": "high"
                  })
@@ -285,6 +274,17 @@ jobs:
                  # Detect if OS package
                  ($original_msg | contains("os-pkgs") or contains("Os Package")) as $is_os_pkg |
                  
+                 # Determine ecosystem using multiple sources (more accurate than just help text)
+                 (if $is_os_pkg then "os-package"
+                  elif ($container_path | contains("site-packages") or contains("/python")) then "python"
+                  elif ($container_path | contains("node_modules")) then "nodejs"
+                  elif ($original_msg | contains("python")) then "python"
+                  elif ($original_msg | contains("node") or contains("npm")) then "nodejs"
+                  elif ($package_name | test("^(pip|setuptools|wheel|django|flask|requests|numpy|pandas)")) then "python"
+                  elif ($package_name | test("^(@|express|react|vue|angular|webpack)")) then "nodejs"
+                  else "library"
+                  end) as $ecosystem |
+                 
                  # Check if fixed version is valid (not empty, null, unknown, or placeholder like ****)
                  ($fixed_version | length > 0 and . != "null" and . != "unknown" and (test("^[*]+$") | not) and (test("[0-9]") or test("[a-zA-Z]"))) as $has_valid_fix |
                  
@@ -300,6 +300,11 @@ jobs:
                  # Build clean message with better line breaks
                  $result |
                  .level = $sarif_level |
+                 
+                 # Add ecosystem tags to properties (now that we have accurate ecosystem)
+                 .properties = ((.properties // {}) + {
+                   "tags": (["container", "ecr", $repo, $ecosystem, "vulnerability"] | sort | unique)
+                 }) |
                  .message.text = (
                    "🛡️ **Container Vulnerability**\n\n" +
                    "**Repository:** " + $repo + "\n" +
