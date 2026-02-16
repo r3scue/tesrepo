@@ -140,7 +140,7 @@ jobs:
             jq --arg image "$IMAGE_URI" \
                --arg repo "$REPO" \
                --arg tag "$LATEST_TAG" \
-               --arg workflow ".github/workflows/image-scan.yml" \
+               --arg workflow ".github/ecr-scan-anchor.md" \
                '
                # Helper function to map severity to score
                def severity_to_score:
