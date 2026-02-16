@@ -182,6 +182,28 @@ jobs:
                  )
                }) | add) as $severity_map |
                
+               # Build lookup map: ruleId -> ecosystem (for rule-level tags)
+               (.runs[0].results // [] | map(
+                 . as $r |
+                 ($r.message.text // "") as $msg |
+                 ($msg | 
+                   if contains("Container Path:") then
+                     (split("Container Path:")[1] | split("\n")[0] | gsub("^[^a-zA-Z0-9/]+"; ""))
+                   else "unknown"
+                   end) as $path |
+                 {
+                   (.ruleId): (
+                     if ($msg | contains("os-pkgs") or contains("Os Package")) then "os-package"
+                     elif ($path | contains("site-packages") or contains("/python")) then "python"
+                     elif ($path | contains("node_modules")) then "nodejs"
+                     elif ($msg | contains("python")) then "python"
+                     elif ($msg | contains("node") or contains("npm")) then "nodejs"
+                     else "library"
+                     end
+                   )
+                 }
+               ) | add) as $ecosystem_map |
+               
                # Enhance rules with context-rich titles and metadata
                .runs[0].tool.driver.rules = [.runs[0].tool.driver.rules[]? |
                  . as $rule |
@@ -196,13 +218,16 @@ jobs:
                  # Get severity from map (already extracted as CRITICAL/HIGH/MEDIUM/LOW)
                  ($severity_map[$rule.id] // "MEDIUM") as $severity |
                  
+                 # Get ecosystem from map (extracted from results)
+                 ($ecosystem_map[$rule.id] // "library") as $ecosystem |
+                 
                  # Format: 🛡️ <repo> — <package> — <CVE> (<Severity>)
                  $rule |
                  .shortDescription.text = "🛡️ " + $repo + " — " + $pkg + " — " + $rule.id + " (" + $severity + ")" |
                  
-                 # Enhance rule properties with security severity and precision
-                 # Note: ecosystem tags will be added later when we have package context
+                 # Enhance rule properties with tags that GitHub will display
                  .properties = (($rule.properties // {}) + {
+                   "tags": (["container", "ecr", $repo, $ecosystem, "vulnerability", $severity | ascii_downcase] | sort | unique),
                    "security-severity": ($severity | severity_to_score),
                    "precision": "high"
                  })
